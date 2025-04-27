@@ -1,0 +1,251 @@
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+import json
+from utils.feature_extraction import compute_velocity
+from utils.helpers import gaussian_kernel
+
+NUM_CLASSES = 5
+WINDOW_SIZE = 32  # Sliding window size
+
+BASE_DIR = "Data"
+TRAIN_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "train", "frames")
+TRAIN_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "train", "annotations")
+TRAIN_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "train", "pose")
+
+VAL_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "val", "frames")
+VAL_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "val", "annotations")
+VAL_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "val", "pose")
+
+TEST_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "test", "frames")
+TEST_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "test", "annotations")
+TEST_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "test", "pose")
+
+
+class FullVideoDataset(Dataset):
+    def __init__(self, frames_dir, anno_dir, pose_dir, mode='train', window_size=WINDOW_SIZE):
+        """
+        Dataset for full video temporal localization
+        
+        Args:
+            frames_dir: Directory containing video frame .npz files
+            anno_dir: Directory containing annotation .json files
+            pose_dir: Directory containing pose data .npz files
+            mode: 'train', 'val', or 'test'
+            window_size: Size of sliding window for processing
+        """
+        self.frames_dir = frames_dir
+        self.anno_dir = anno_dir
+        self.pose_dir = pose_dir
+        self.mode = mode
+        self.window_size = window_size
+        self.samples = []
+
+        video_ids = []
+        frame_files = os.listdir(frames_dir) if os.path.exists(frames_dir) else []
+        
+        for fname in frame_files:
+            if fname.endswith("_frames.npz"):
+                video_id = fname.replace("_frames.npz", "")
+                anno_path = os.path.join(anno_dir, f"{video_id}_annotations.json")
+                pose_path = os.path.join(pose_dir, f"{video_id}_pose.npz")
+                
+                if os.path.exists(anno_path) and os.path.exists(pose_path):
+                    video_ids.append(video_id)
+                else:
+                    missing = []
+                    if not os.path.exists(anno_path): missing.append("annotations")
+                    if not os.path.exists(pose_path): missing.append("pose")
+                    print(f"Skipping {video_id} - missing {', '.join(missing)}")
+        
+        for video_id in video_ids:
+            self._process_video(video_id)
+                
+        print(f"[{mode}] Loaded {len(self.samples)} sliding windows from {len(video_ids)} videos")
+        
+    def _process_video(self, video_id):
+        """Process a single video and generate sliding window samples"""
+        anno_path = os.path.join(self.anno_dir, f"{video_id}_annotations.json")
+        with open(anno_path, 'r') as f:
+            anno = json.load(f)
+        
+        num_frames = anno["num_frames"]
+        annotations = anno["annotations"]
+        
+        if num_frames < self.window_size:
+            self._add_window(video_id, 0, num_frames, annotations)
+            return
+            
+        stride = self.window_size // 2 
+        
+        for start in range(0, num_frames - self.window_size + 1, stride):
+            end = start + self.window_size
+            self._add_window(video_id, start, end, annotations)
+            
+        if (num_frames - self.window_size) % stride != 0:
+            start = num_frames - self.window_size
+            end = num_frames
+            self._add_window(video_id, start, end, annotations)
+            
+    def _add_window(self, video_id, start_idx, end_idx, all_annotations):
+        """Add a sliding window with corresponding annotations to samples"""
+        window_annos = []
+        
+        for anno in all_annotations:
+            action_start = anno["start_frame"]
+            action_end = anno["end_frame"]
+            
+            if action_end < start_idx or action_start >= end_idx:
+                continue  # No overlap
+                
+            rel_start = max(0, action_start - start_idx)
+            rel_end = min(end_idx - start_idx, action_end - start_idx)
+            
+            if rel_end > rel_start:
+                window_annos.append({
+                    "action_id": anno["action_id"],
+                    "start_frame": rel_start,
+                    "end_frame": rel_end,
+                    "original_start": anno["original_start"],
+                    "original_end": anno["original_end"]
+                })
+
+        self.samples.append({
+            "video_id": video_id,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "annotations": window_annos
+            })
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        video_id = sample["video_id"]
+        start_idx = sample["start_idx"]
+        end_idx = sample["end_idx"]
+        annotations = sample["annotations"]
+        
+        frames_path = os.path.join(self.frames_dir, f"{video_id}_frames.npz")
+        npz_data = np.load(frames_path)
+        all_frames = npz_data['frames']
+        
+        pose_path = os.path.join(self.pose_dir, f"{video_id}_pose.npz")
+        pose_npz = np.load(pose_path)
+        all_pose = pose_npz['pose']
+        
+        if end_idx <= all_frames.shape[0]:
+            frames = all_frames[start_idx:end_idx]
+        else:
+            frames = np.zeros((self.window_size, *all_frames.shape[1:]), dtype=all_frames.dtype)
+            actual_frames = all_frames[start_idx:end_idx]
+            frames[:actual_frames.shape[0]] = actual_frames
+            if actual_frames.shape[0] > 0:
+                frames[actual_frames.shape[0]:] = actual_frames[-1]
+        
+        if end_idx <= all_pose.shape[0]:
+            pose_data = all_pose[start_idx:end_idx]
+        else:
+            pose_data = np.zeros((self.window_size, all_pose.shape[1]), dtype=all_pose.dtype)
+            actual_pose = all_pose[start_idx:end_idx]
+            pose_data[:actual_pose.shape[0]] = actual_pose
+            if actual_pose.shape[0] > 0:
+                pose_data[actual_pose.shape[0]:] = actual_pose[-1]
+        
+        velocity_data = compute_velocity(pose_data)
+        
+        pose_with_velocity = np.concatenate([pose_data, velocity_data], axis=1)
+                
+        frames = torch.from_numpy(frames).float() / 255.0 
+        frames = frames.permute(3, 0, 1, 2)
+        
+        pose_with_velocity = torch.from_numpy(pose_with_velocity).float()
+        
+
+        action_masks = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+        
+
+        start_mask = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+        end_mask = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+
+
+        for anno in annotations:
+            action_id = anno["action_id"]
+            s, e = anno["start_frame"], anno["end_frame"]
+            
+            action_masks[action_id, s:e] = 1.0
+            
+            start_mask[action_id] += gaussian_kernel(s, self.window_size, sigma=2.0)
+            end_mask[action_id] += gaussian_kernel(e-1, self.window_size, sigma=2.0)
+            
+        start_mask = torch.clamp(start_mask, 0, 1)
+        end_mask = torch.clamp(end_mask, 0, 1)
+        
+        metadata = {
+            "video_id": video_id,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "annotations": annotations,
+        }
+
+        
+        return frames, pose_with_velocity,action_masks, start_mask, end_mask, metadata
+
+def custom_collate_fn(batch):
+
+    frames, pose_data, action_masks, start_masks, end_masks, metadata = zip(*batch)
+    
+    frames = torch.stack(frames)
+    pose_data = torch.stack(pose_data)
+    action_masks = torch.stack(action_masks)
+    start_masks = torch.stack(start_masks)
+    end_masks = torch.stack(end_masks)
+    
+    return frames, pose_data, action_masks, start_masks, end_masks, metadata
+
+def get_train_loader(batch_size=1, shuffle=True):
+    dataset = FullVideoDataset(
+        TRAIN_FRAMES_DIR, 
+        TRAIN_ANNO_DIR, 
+        TRAIN_POSE_DIR,
+        mode='train'
+    )
+    return DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        num_workers=4,
+        collate_fn=custom_collate_fn
+    )
+
+def get_val_loader(batch_size=1, shuffle=False):
+    dataset = FullVideoDataset(
+        VAL_FRAMES_DIR, 
+        VAL_ANNO_DIR, 
+        VAL_POSE_DIR,
+        mode='val'
+    )
+    return DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        num_workers=4,
+        collate_fn=custom_collate_fn
+    )
+
+def get_test_loader(batch_size=1, shuffle=False):
+    dataset = FullVideoDataset(
+        TEST_FRAMES_DIR, 
+        TEST_ANNO_DIR, 
+        TEST_POSE_DIR,
+        mode='test'
+    )
+    return DataLoader(
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
+        num_workers=4,
+        collate_fn=custom_collate_fn
+    )
