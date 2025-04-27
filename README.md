@@ -1,4 +1,4 @@
-# Temporal Action Detection Project
+# Temporal Action Detection
 
 ## Introduction
 
