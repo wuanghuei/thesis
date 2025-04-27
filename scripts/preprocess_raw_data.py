@@ -9,12 +9,6 @@ from pathlib import Path
 from tqdm import tqdm
 from src.utils.helpers import find_nearest_subsampled_idx
 
-VIDEO_DIR = r"Data\Videos_MERL_Shopping_Dataset\train"
-LABEL_DIR = r"Data\Labels_MERL_Shopping_Dataset\train"
-OUTPUT_DIR = r"Data\full_videos\train"
-FRAME_SIZE = 224
-SUBSAMPLE = 2
-
 def prepare_full_video(video_path, label_path, output_dir_split, frame_size, subsample_factor):
     """Process full video and save with temporal action annotations."""
 
