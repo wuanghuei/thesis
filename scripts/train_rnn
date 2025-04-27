@@ -12,9 +12,9 @@ from tqdm import tqdm
 # Import the RNN model definition
 try:
     # Adjust path if your model file is elsewhere
-    from models.rnn_postprocessor import RNNPostProcessor 
+    from src.models.rnn_postprocessor import RNNPostProcessor 
 except ImportError:
-    print("Error: Could not import RNNPostProcessor from models/rnn_postprocessor.py")
+    print("Error: Could not import RNNPostProcessor from src/models/rnn_postprocessor.py")
     print("Please ensure the file exists and is in the correct directory.")
     exit()
 
