@@ -5,106 +5,76 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
-import yaml # Import YAML
+import yaml
 
-# Updated imports to use moved functions/classes
 from src.utils.helpers import reconstruct_full_video_probs, calculate_global_gt
 from src.utils.postprocessing import labels_to_segments
 from src.utils.visualization import visualize_rnn_predictions
-# Import the consolidated metrics calculation function
 from src.evaluation import compute_final_metrics
-# Import only necessary models
 try:
     from src.models.rnn_postprocessor import RNNPostProcessor
 except ImportError:
     print("Error: Could not import RNNPostProcessor from src/models/rnn_postprocessor.py")
     exit()
-
-# ====== Configuration ======
-# Constants that might be moved to a config file later
+    
 NUM_CLASSES = 5
-BACKGROUND_LABEL = NUM_CLASSES # Consistent label for background state
+BACKGROUND_LABEL = NUM_CLASSES
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Default paths (can be overridden by args)
 DEFAULT_RNN_CHECKPOINT = "best/rnn_checkpoints/best_rnn_model.pth"
-DEFAULT_INFERENCE_PKL = "best/test_inference_raw.pkl" # Default PKL for evaluation
+DEFAULT_INFERENCE_PKL = "best/test_inference_raw.pkl"
 
-# ====== Helper Function for RNN Processing Loop ======
 def _run_rnn_on_all_videos(rnn_model, all_raw_preds, all_batch_meta, global_action_gt_by_video, device, num_classes, background_label):
     """Runs the loaded RNN model on reconstructed features for all videos."""
     print("\nStep 4: Running RNN Post-Processing...")
     rnn_predictions_by_video = defaultdict(lambda: defaultdict(list))
     rnn_all_action_preds_flat = defaultdict(list)
     
-    # Use video IDs found in the metadata from inference run
     unique_video_ids_to_process = sorted(list(global_action_gt_by_video.keys()))
     if not unique_video_ids_to_process:
          print("Warning: No unique video IDs found in metadata. Cannot run RNN post-processing.")
          return rnn_predictions_by_video, rnn_all_action_preds_flat
 
     for video_id in tqdm(unique_video_ids_to_process, desc="RNN Processing Videos"):
-        # 1. Reconstruct input features (probabilities) for this video
-        # Assumes reconstruct_full_video_probs now takes num_classes and window_size if needed implicitly from data dims
         avg_action_probs, avg_start_probs, avg_end_probs, num_frames = reconstruct_full_video_probs(
             video_id, all_raw_preds, all_batch_meta
-        )
-        
+        )      
         if num_frames is None or num_frames <= 0:
             continue
-
-        # 2. Combine features and prepare for RNN input
-        # Assuming input size is 3 * num_classes
         input_features = np.concatenate([avg_action_probs, avg_start_probs, avg_end_probs], axis=1)
-        input_tensor = torch.tensor(input_features, dtype=torch.float32).unsqueeze(0).to(device) # Add batch dim
+        input_tensor = torch.tensor(input_features, dtype=torch.float32).unsqueeze(0).to(device)
         
-        # 3. Run RNN model
         with torch.no_grad():
-            logits = rnn_model(input_tensor) # Shape: (1, T, num_classes_out)
-            # Calculate softmax probabilities ONCE per video
-            probs = torch.softmax(logits.squeeze(0), dim=1) # Shape: (T, num_classes_out)
-
-        # 4. Get predicted labels
-        predicted_labels = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy() # Shape: (T,)
-
-        # 5. Convert labels to segments
+            logits = rnn_model(input_tensor)
+            probs = torch.softmax(logits.squeeze(0), dim=1)
+        predicted_labels = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy()
         video_segments = labels_to_segments(predicted_labels, ignore_label=background_label)
-
-        # 6. Store segments WITH calculated confidence scores
         for action_id, segments in video_segments.items():
             processed_segments = []
             for s in segments:
                 start, end = s['start_frame'], s['end_frame']
-                if end > start: # Ensure segment is not empty
-                    segment_probs = probs[start:end, :] # Shape: (segment_len, num_classes_out)
+                if end > start:
+                    segment_probs = probs[start:end, :]
                     if segment_probs.numel() > 0:
-                         probs_of_action_id = segment_probs[:, action_id] # Shape: (segment_len,)
+                         probs_of_action_id = segment_probs[:, action_id]
                          segment_score = torch.mean(probs_of_action_id).item()
                     else:
                          segment_score = 0.0 
-
                     processed_segments.append({'segment': (start, end), 'score': segment_score})
-
             if processed_segments:
                 rnn_predictions_by_video[video_id][action_id] = processed_segments
                 rnn_all_action_preds_flat[action_id].extend(processed_segments)
 
     return rnn_predictions_by_video, rnn_all_action_preds_flat
 
-
-# ====== Main Evaluation Function Structure ======
 def main_evaluate(cfg, args):
-    # Determine device based on config
     if cfg['global']['device'] == 'auto':
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(cfg['global']['device'])
     
     num_classes = cfg['global']['num_classes']
-    background_label = num_classes # Derived from num_classes
-    
-    # Get paths from config, potentially overridden by args if needed
-    # If args are None, use the path from config
+    background_label = num_classes
     rnn_checkpoint_path = args.rnn_checkpoint_path if args.rnn_checkpoint_path else cfg['pipeline_evaluation']['rnn_checkpoint_to_use']
     inference_output_path = args.inference_output_path if args.inference_output_path else cfg['pipeline_evaluation']['inference_results_pkl']
 
@@ -112,7 +82,6 @@ def main_evaluate(cfg, args):
     print(f"Evaluating using RNN post-processor checkpoint: {rnn_checkpoint_path}")
     print(f"Loading base model inference results from: {inference_output_path}")
     
-    # --- Load Base Model Inference Results (Step 1) ---
     if not inference_output_path or not os.path.exists(inference_output_path):
         print(f"Error: Inference results file not found or not specified: {inference_output_path}")
         return
@@ -128,14 +97,12 @@ def main_evaluate(cfg, args):
         print(f"Error loading inference results: {e}.")
         return
 
-    # --- Calculate Global Ground Truth (Step 2) ---
     print("\nStep 2: Calculating Global Ground Truth...")
     final_global_gt, total_global_gt_segments, global_action_gt_by_video = calculate_global_gt(all_batch_meta, num_classes)
     print(f"Global GT calculated. Total unique GT segments: {total_global_gt_segments}")
     for c in range(num_classes):
         print(f"  Class {c} GT count: {len(final_global_gt.get(c, []))}")
 
-    # --- Load RNN Model (Step 3) ---
     print("\nStep 3: Loading RNN Post-Processor Model...")
     if not os.path.exists(rnn_checkpoint_path):
         print(f"Error: RNN checkpoint not found at {rnn_checkpoint_path}")
@@ -143,19 +110,17 @@ def main_evaluate(cfg, args):
         
     try:
         rnn_checkpoint = torch.load(rnn_checkpoint_path, map_location=device)
-        # Try loading args saved with RNN checkpoint, otherwise use config
         rnn_args_loaded = rnn_checkpoint.get('args', None)
         if rnn_args_loaded:
              print("Using RNN hyperparameters from checkpoint.")
-             rnn_model_cfg = rnn_args_loaded # Use loaded args
+             rnn_model_cfg = rnn_args_loaded
         else:
              print("Warning: RNN checkpoint does not contain training arguments. Using config file.")
-             rnn_model_cfg = cfg['rnn_training']['model'] # Use config
+             rnn_model_cfg = cfg['rnn_training']['model']
 
         rnn_input_size = 3 * num_classes 
         rnn_num_classes_out = num_classes + 1
-        
-        # Initialize model using parameters from checkpoint args or config
+
         rnn_model = RNNPostProcessor(
             input_size=rnn_input_size,
             hidden_size=rnn_model_cfg['hidden_size'],
@@ -174,18 +139,15 @@ def main_evaluate(cfg, args):
         print(f"Error loading RNN checkpoint: {e}")
         return
 
-    # --- Run RNN Post-Processing using Helper Function (Step 4) ---
     rnn_predictions_by_video, rnn_all_action_preds_flat = _run_rnn_on_all_videos(
         rnn_model, all_raw_preds, all_batch_meta, global_action_gt_by_video, 
         device, num_classes, background_label
     )
 
-    # --- Calculate Final Metrics using Imported Function (Step 5, 6, 7) ---
     print("\nStep 5, 6, 7: Calculating final metrics...")
-    
-    # Prepare data for compute_final_metrics (it needs global frame preds/targets)
+
     rnn_all_frame_targets_flat = []
-    rnn_all_frame_preds_flat_for_metric = [] # Renamed to avoid confusion
+    rnn_all_frame_preds_flat_for_metric = []
     all_involved_videos_rnn = set(global_action_gt_by_video.keys()) | set(rnn_predictions_by_video.keys())
     
     print(f"Calculating Global Frame-Level metrics for {len(all_involved_videos_rnn)} videos (RNN)...")
@@ -202,15 +164,13 @@ def main_evaluate(cfg, args):
         
         video_targets = np.zeros((video_length, num_classes), dtype=int)
         video_preds = np.zeros((video_length, num_classes), dtype=int)
-        
-        # Populate targets
+
         if video_id in global_action_gt_by_video:
             for c, segments in global_action_gt_by_video[video_id].items():
                 for start, end in set(segments):
                     if end > start and 0 <= c < num_classes: 
                          video_targets[start:min(end, video_length), c] = 1
-                         
-        # Populate predictions based on RNN segments
+
         if video_id in rnn_predictions_by_video:
              for c, segments in rnn_predictions_by_video[video_id].items():
                   for seg_info in segments:
@@ -221,7 +181,6 @@ def main_evaluate(cfg, args):
         rnn_all_frame_targets_flat.extend(video_targets.flatten())
         rnn_all_frame_preds_flat_for_metric.extend(video_preds.flatten()) 
 
-    # Now call the centralized metric calculation function
     final_metrics = compute_final_metrics(
         global_action_gt_global=final_global_gt, 
         merged_all_action_preds=rnn_all_action_preds_flat, 
@@ -230,7 +189,6 @@ def main_evaluate(cfg, args):
         num_classes=num_classes
     )
 
-    # --- Print Final Results (Step 8 - Adjusted) ---
     print("\n\n--- RNN Post-Processing Evaluation Results ---")
     print(f"RNN mAP (IoU 0.3,0.5,0.7): {final_metrics.get('mAP', 0.0):.4f}")
     print(f"RNN mAP@mid: {final_metrics.get('map_mid', 0.0):.4f}")
@@ -247,22 +205,18 @@ def main_evaluate(cfg, args):
     for c in range(num_classes):
         ap = class_aps.get(c, 0.0)
         preds_count = len(rnn_all_action_preds_flat.get(c, []))
-        # Print placeholder for class F1 scores, as they are not returned by compute_final_metrics currently
         print(f"{c:<5} | {ap:.4f} | {preds_count:<5} | N/A    | N/A") 
     print("-" * len(header))
     total_rnn_preds = sum(len(v) for v in rnn_all_action_preds_flat.values())
     print(f"Total RNN Pred Segments: {total_rnn_preds}") 
     print(f"Total GT Segments: {total_global_gt_segments}") 
 
-    # --- Optional Visualization (Step 9) ---
-    # Use visualization settings from config, potentially overridden by args
     vis_cfg = cfg['pipeline_evaluation']['visualization']
     vis_video_id = args.visualize_video_id if args.visualize_video_id else vis_cfg['video_id']
     vis_enabled = args.visualize_video_id is not None or vis_cfg['enabled']
     
     if vis_enabled and vis_video_id:
         print(f"\n--- Preparing for Visualization of Video ID: {vis_video_id} ---")
-        # Get template and output path from args if provided, else from config
         frames_template = args.frames_npz_path_template if args.frames_npz_path_template else vis_cfg['frames_npz_template']
         output_video_path = args.output_video_path if args.output_video_path else vis_cfg['output_video_path']
         fps = args.fps if args.fps is not None else vis_cfg['fps']
@@ -273,10 +227,8 @@ def main_evaluate(cfg, args):
              print("Error: --output_video_path or config['pipeline_evaluation']['visualization']['output_video_path'] is required.")
         else:
             try:
-                # Format the template and output path
                 vis_npz_path = frames_template.format(video_id=vis_video_id)
                 formatted_output_video_path = output_video_path.format(video_id=vis_video_id)
-                # Create output directory if it doesn't exist
                 output_dir = os.path.dirname(formatted_output_video_path)
                 if output_dir and not os.path.exists(output_dir):
                     os.makedirs(output_dir)
@@ -300,23 +252,20 @@ def main_evaluate(cfg, args):
             elif not formatted_output_video_path:
                  print("Error: Could not determine visualization output path.")
 
-# ====== Argument Parser ======
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Base Model + RNN Post-Processor Pipeline")
     parser.add_argument('--config', default='configs/config.yaml', help='Path to configuration file')
-    # Allow overriding specific paths via command line
     parser.add_argument("--rnn_checkpoint_path", type=str, default=None, help="Override RNN checkpoint path from config")
     parser.add_argument("--inference_output_path", type=str, default=None, help="Override inference results pkl path from config")
     
-    # Visualization args override config settings if provided
+    # Visualization
     parser.add_argument("--visualize_video_id", type=str, default=None, help="Optional video ID to visualize (overrides config)")
     parser.add_argument("--frames_npz_path_template", type=str, default=None, help="Override frame NPZ path template from config")
     parser.add_argument("--output_video_path", type=str, default=None, help="Override visualization output video path from config")
     parser.add_argument("--fps", type=int, default=None, help="Override FPS for visualization video from config")
 
     args = parser.parse_args()
-    
-    # Load config
+
     try:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
@@ -326,6 +275,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Error loading config file: {e}")
         exit()
-        
-    # Pass both cfg and args to main function
     main_evaluate(cfg, args) 
