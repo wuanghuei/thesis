@@ -3,28 +3,12 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import json
+from pathlib import Path
 from utils.feature_extraction import compute_velocity
 from utils.helpers import gaussian_kernel
 
-NUM_CLASSES = 5
-WINDOW_SIZE = 32  # Sliding window size
-
-BASE_DIR = "Data"
-TRAIN_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "train", "frames")
-TRAIN_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "train", "annotations")
-TRAIN_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "train", "pose")
-
-VAL_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "val", "frames")
-VAL_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "val", "annotations")
-VAL_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "val", "pose")
-
-TEST_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "test", "frames")
-TEST_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "test", "annotations")
-TEST_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "test", "pose")
-
-
 class FullVideoDataset(Dataset):
-    def __init__(self, frames_dir, anno_dir, pose_dir, mode='train', window_size=WINDOW_SIZE):
+    def __init__(self, frames_dir, anno_dir, pose_dir, num_classes, window_size, mode='train'):
         """
         Dataset for full video temporal localization
         
@@ -32,31 +16,33 @@ class FullVideoDataset(Dataset):
             frames_dir: Directory containing video frame .npz files
             anno_dir: Directory containing annotation .json files
             pose_dir: Directory containing pose data .npz files
-            mode: 'train', 'val', or 'test'
+            num_classes: Number of action classes
             window_size: Size of sliding window for processing
+            mode: 'train', 'val', or 'test'
         """
-        self.frames_dir = frames_dir
-        self.anno_dir = anno_dir
-        self.pose_dir = pose_dir
-        self.mode = mode
+        self.frames_dir = Path(frames_dir)
+        self.anno_dir = Path(anno_dir)
+        self.pose_dir = Path(pose_dir)
+        self.num_classes = num_classes
         self.window_size = window_size
+        self.mode = mode
         self.samples = []
 
         video_ids = []
-        frame_files = os.listdir(frames_dir) if os.path.exists(frames_dir) else []
+        frame_files = [f.name for f in self.frames_dir.iterdir()] if self.frames_dir.exists() else []
         
         for fname in frame_files:
             if fname.endswith("_frames.npz"):
                 video_id = fname.replace("_frames.npz", "")
-                anno_path = os.path.join(anno_dir, f"{video_id}_annotations.json")
-                pose_path = os.path.join(pose_dir, f"{video_id}_pose.npz")
+                anno_path = self.anno_dir / f"{video_id}_annotations.json"
+                pose_path = self.pose_dir / f"{video_id}_pose.npz"
                 
-                if os.path.exists(anno_path) and os.path.exists(pose_path):
+                if anno_path.exists() and pose_path.exists():
                     video_ids.append(video_id)
                 else:
                     missing = []
-                    if not os.path.exists(anno_path): missing.append("annotations")
-                    if not os.path.exists(pose_path): missing.append("pose")
+                    if not anno_path.exists(): missing.append("annotations")
+                    if not pose_path.exists(): missing.append("pose")
                     print(f"Skipping {video_id} - missing {', '.join(missing)}")
         
         for video_id in video_ids:
@@ -66,7 +52,7 @@ class FullVideoDataset(Dataset):
         
     def _process_video(self, video_id):
         """Process a single video and generate sliding window samples"""
-        anno_path = os.path.join(self.anno_dir, f"{video_id}_annotations.json")
+        anno_path = self.anno_dir / f"{video_id}_annotations.json"
         with open(anno_path, 'r') as f:
             anno = json.load(f)
         
@@ -128,11 +114,11 @@ class FullVideoDataset(Dataset):
         end_idx = sample["end_idx"]
         annotations = sample["annotations"]
         
-        frames_path = os.path.join(self.frames_dir, f"{video_id}_frames.npz")
+        frames_path = self.frames_dir / f"{video_id}_frames.npz"
         npz_data = np.load(frames_path)
         all_frames = npz_data['frames']
         
-        pose_path = os.path.join(self.pose_dir, f"{video_id}_pose.npz")
+        pose_path = self.pose_dir / f"{video_id}_pose.npz"
         pose_npz = np.load(pose_path)
         all_pose = pose_npz['pose']
         
@@ -164,11 +150,11 @@ class FullVideoDataset(Dataset):
         pose_with_velocity = torch.from_numpy(pose_with_velocity).float()
         
 
-        action_masks = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+        action_masks = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
         
 
-        start_mask = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
-        end_mask = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+        start_mask = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
+        end_mask = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
 
 
         for anno in annotations:
@@ -205,47 +191,89 @@ def custom_collate_fn(batch):
     
     return frames, pose_data, action_masks, start_masks, end_masks, metadata
 
-def get_train_loader(batch_size=1, shuffle=True):
+def get_train_loader(cfg, shuffle=True):
+    data_cfg = cfg.get('data', {})
+    train_cfg = cfg.get('base_model_training', {})
+    global_cfg = cfg.get('global', {})
+
+    frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/frames'
+    anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/annotations'
+    pose_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/pose'
+    num_classes = global_cfg.get('num_classes', 5)
+    window_size = global_cfg.get('window_size', 32)
+    batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
+    num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
+
     dataset = FullVideoDataset(
-        TRAIN_FRAMES_DIR, 
-        TRAIN_ANNO_DIR, 
-        TRAIN_POSE_DIR,
+        frames_dir,
+        anno_dir,
+        pose_dir,
+        num_classes=num_classes,
+        window_size=window_size,
         mode='train'
     )
     return DataLoader(
-        dataset, 
-        batch_size=batch_size, 
-        shuffle=shuffle, 
-        num_workers=4,
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
         collate_fn=custom_collate_fn
     )
 
-def get_val_loader(batch_size=1, shuffle=False):
+def get_val_loader(cfg, shuffle=False):
+    data_cfg = cfg.get('data', {})
+    train_cfg = cfg.get('base_model_training', {})
+    global_cfg = cfg.get('global', {})
+
+    frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/frames'
+    anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/annotations'
+    pose_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/pose'
+    num_classes = global_cfg.get('num_classes', 5)
+    window_size = global_cfg.get('window_size', 32)
+    val_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
+    num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
+
     dataset = FullVideoDataset(
-        VAL_FRAMES_DIR, 
-        VAL_ANNO_DIR, 
-        VAL_POSE_DIR,
+        frames_dir,
+        anno_dir,
+        pose_dir,
+        num_classes=num_classes,
+        window_size=window_size,
         mode='val'
     )
     return DataLoader(
-        dataset, 
-        batch_size=batch_size, 
-        shuffle=shuffle, 
-        num_workers=4,
+        dataset,
+        batch_size=val_batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
         collate_fn=custom_collate_fn
     )
 
-def get_test_loader(batch_size=1, shuffle=False):
+def get_test_loader(cfg, shuffle=False):
+    data_cfg = cfg.get('data', {})
+    train_cfg = cfg.get('base_model_training', {})
+    global_cfg = cfg.get('global', {})
+
+    frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/frames'
+    anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/annotations'
+    pose_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/pose'
+    num_classes = global_cfg.get('num_classes', 5)
+    window_size = global_cfg.get('window_size', 32)
+    test_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
+    num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
+
     dataset = FullVideoDataset(
-        TEST_FRAMES_DIR, 
-        TEST_ANNO_DIR, 
-        TEST_POSE_DIR,
+        frames_dir,
+        anno_dir,
+        pose_dir,
+        num_classes=num_classes,
+        window_size=window_size,
         mode='test'
     )
     return DataLoader(
-        dataset, 
-        batch_size=batch_size, 
-        shuffle=shuffle, 
-        num_workers=4,
+        dataset,
+        batch_size=test_batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
         collate_fn=custom_collate_fn
     )

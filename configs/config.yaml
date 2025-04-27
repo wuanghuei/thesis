@@ -1,0 +1,136 @@
+# configs/config.yaml
+
+# Global settings (used across multiple scripts)
+project_name: TemporalActionDetection
+seed: 42
+num_classes: 5
+window_size: 32 # Used by base model dataloader & training
+device: cuda    # Options: auto, cpu, cuda
+
+# Data Paths (adjust base_dir and relative paths as needed)
+data:
+  base_dir: Data
+  # Raw data input directories
+  raw_video_dir: ${data.base_dir}/Videos_MERL_Shopping_Dataset
+  raw_label_dir: ${data.base_dir}/Labels_MERL_Shopping_Dataset
+  # Processed data output/input directories
+  processed_dir: ${data.base_dir}/full_videos # Contains frames_npz, annotations_json, pose_npz
+  base_model_checkpoints: checkpoints
+  rnn_model_checkpoints: rnn_checkpoints
+  rnn_processed_data: rnn_processed_data
+  logs: logs
+  # Specific file names / templates used by different scripts
+  base_best_checkpoint_name: best_model_velocity.pth
+  base_resume_checkpoint_name: interim_model_epoch15.pth # Example, might change based on actual file
+  rnn_best_checkpoint_name: best_rnn_model.pth
+  train_inference_raw_name: train_inference_raw.pkl
+  val_inference_raw_name: val_inference_raw.pkl
+  test_inference_raw_name: test_inference_raw.pkl # Default for evaluation
+
+# Preprocessing Stage (prepare_segments.py)
+preprocessing:
+  frame_size: 224
+  subsample_factor: 2
+  # Note: The script currently hardcodes the 'train' split.
+  # Refactoring needed to make split configurable (e.g., train, test, val).
+
+# Feature Extraction Stage (extract_pose_features.py)
+feature_extraction:
+  pose:
+    model_complexity: 1
+    min_detection_confidence: 0.5
+  # Note: The split ('train', 'test', 'all') is handled by argparse in the script.
+
+# Base Model Training (train_base_model.py)
+base_model_training:
+  resume_training: True
+  use_mixed_precision: True
+  epochs: 100
+  batch_size: 1 # Effective batch size = batch_size * gradient_accumulation_steps
+  gradient_accumulation_steps: 4
+  optimizer:
+    type: AdamW
+    lr: 1e-5
+    weight_decay: 1e-4
+    eps: 1e-4
+  scheduler: # ReduceLROnPlateau
+    factor: 0.2
+    patience: 3
+    min_lr: 1e-6
+  warmup:
+    epochs: 7
+    # start_lr = lr / factor (factor defined below)
+    factor: 2.5 # Multiplier for peak LR relative to base LR
+  loss:
+    action_weight: 1.5
+    start_weight: 1.5
+    end_weight: 1.5
+    label_smoothing: 0.1
+    # Note: Class weights currently hardcoded in ActionDetectionLoss, could be moved here.
+  gradient_clipping:
+    max_norm: 7.0
+  postprocessing: # Thresholds used during evaluation within training loop
+    boundary_threshold: 0.11
+    class_thresholds: [0.15, 0.15, 0.01, 0.08, 0.15]
+    nms_threshold: 0.4
+    min_segment_length: 3 # Check if custom_post_process still uses this
+  evaluation: # Settings for evaluation run after training completion
+    run_final_evaluation_on_test: True
+  debugging:
+    debug_detection_enabled: True # Enables calling debug_detection_stats
+  dataloader:
+    num_workers: 4
+    batch_size: 1
+
+# RNN Data Generation (generate_rnn_data.py)
+rnn_data_generation:
+  # Path to the base model checkpoint to use for generating features
+  base_checkpoint_to_use: ${data.base_model_checkpoints}/${data.base_best_checkpoint_name} # Default, can be overridden via args potentially
+  dataloader: # Settings for running base model inference
+    train_batch_size: 4
+    val_batch_size: 8
+    num_workers: 0
+  use_mixed_precision: True # For running base model inference
+
+# RNN Model Training (train_rnn.py)
+rnn_training:
+  model:
+    input_size: 15 # 3 * num_classes
+    num_classes: 6 # num_classes + 1 (background)
+    type: lstm # 'lstm' or 'gru'
+    hidden_size: 128
+    num_layers: 2
+    dropout_prob: 0.5
+    bidirectional: True
+    # input_size (3 * num_classes) and num_classes_out (num_classes + 1) derived automatically
+  epochs: 50
+  batch_size: 16
+  optimizer:
+    type: AdamW
+    lr: 1e-3
+    # weight_decay: 0 # Add if needed
+  scheduler: # ReduceLROnPlateau
+    factor: 0.5
+    patience: 5
+    # patience derived from early_stopping.patience // 2
+  early_stopping:
+    patience: 10
+  dataloader:
+    num_workers: 1
+  loss:
+    ignore_index: -100 # For padding labels
+  val_batch_size: 32
+
+# Pipeline Evaluation (evaluate_pipeline.py)
+pipeline_evaluation:
+  # Path to the RNN checkpoint to evaluate
+  rnn_checkpoint_to_use: ${data.rnn_model_checkpoints}/${data.rnn_best_checkpoint_name}
+  # Path to the pkl file containing inference results from the base model
+  inference_results_pkl: ${data.logs}/${data.test_inference_raw_name} # Default to test pkl, adjust if evaluating validation
+  visualization:
+    enabled: False # Set to True and provide details below to generate visualization
+    video_id: null # Specify a video ID like 'subject1_session1_crop'
+    # Template for finding frame NPZ files for the specified video_id and split (e.g., test)
+    frames_npz_template: "${data.processed_dir}/test/frames/{video_id}_frames.npz"
+    output_video_path: "${data.logs}/visualization_{video_id}.mp4" # Output path for the visualization
+    fps: 15 

@@ -4,79 +4,85 @@ import mediapipe as mp
 import argparse
 from tqdm import tqdm
 import glob
+import yaml
+from pathlib import Path
 from src.utils.feature_extraction import extract_pose_features
 
 mp_pose = mp.solutions.pose
 
-BASE_DIR = "Data"
-TRAIN_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "train", "frames")
-VAL_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "val", "frames")
-TEST_FRAMES_DIR = os.path.join(BASE_DIR, "full_videos", "test", "frames")
-
-TRAIN_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "train", "annotations")
-VAL_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "val", "annotations")
-TEST_ANNO_DIR = os.path.join(BASE_DIR, "full_videos", "test", "annotations")
-
-TRAIN_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "train", "pose")
-VAL_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "val", "pose")
-TEST_POSE_DIR = os.path.join(BASE_DIR, "full_videos", "test", "pose")
-
-
-os.makedirs(TRAIN_POSE_DIR, exist_ok=True)
-os.makedirs(VAL_POSE_DIR, exist_ok=True)
-os.makedirs(TEST_POSE_DIR, exist_ok=True)
-
-
-def process_video(video_id, frames_dir, pose_dir, anno_dir):
-    """Process a single video to extract pose and hand features"""
-    npz_path = os.path.join(frames_dir, f"{video_id}_frames.npz")
+def process_video(video_id, frames_dir, pose_dir, pose_config):
+    """Process a single video to extract pose features using config."""
+    npz_path = Path(frames_dir) / f"{video_id}_frames.npz"
     
-    if not os.path.exists(npz_path):
+    if not npz_path.exists():
         print(f"Frames file not found: {npz_path}")
         return False
     
-    frames_data = np.load(npz_path)
-    frames = frames_data['frames']
+    try:
+        frames_data = np.load(npz_path)
+        frames = frames_data['frames']
+    except Exception as e:
+        print(f"Error loading frames from {npz_path}: {e}")
+        return False
+        
     num_frames = frames.shape[0]
        
     with mp_pose.Pose(
         static_image_mode=False, 
-        model_complexity=1,
-        min_detection_confidence=0.5) as pose_detector:
+        model_complexity=pose_config['model_complexity'],
+        min_detection_confidence=pose_config['min_detection_confidence']) as pose_detector:
         
         pose_features = np.zeros((num_frames, 99))  # 33 landmarks × 3 coordinates
         
         for i in tqdm(range(num_frames), desc=f"Processing {video_id}"):
             frame = frames[i]
-
-            pose_features[i]= extract_pose_features(frame, pose_detector)
+            pose_features[i] = extract_pose_features(frame, pose_detector)
             
     
-    pose_output_path = os.path.join(pose_dir, f"{video_id}_pose.npz")
-    np.savez_compressed(pose_output_path, pose=pose_features)
+    pose_output_path = Path(pose_dir) / f"{video_id}_pose.npz"
+    try:
+        pose_output_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(pose_output_path, pose=pose_features)
+    except Exception as e:
+        print(f"Error saving pose features to {pose_output_path}: {e}")
+        return False
 
-    print(f"saved features for {video_id}, shape: {pose_features.shape}")
-    
     return True
 
-def process_dataset(frames_dir, anno_dir, pose_dir):
-    """Process all videos in a dataset split"""
-    frame_files = glob.glob(os.path.join(frames_dir, "*_frames.npz"))
+def process_dataset(split_name, frames_dir, pose_dir, pose_config):
+    """Process all videos in a dataset split using config."""
+    print(f"Processing {split_name} data...")
+    print(f"  Frames dir: {frames_dir}")
+    print(f"  Pose output dir: {pose_dir}")
     
+    if not Path(frames_dir).exists():
+        print(f"Warning: Frames directory not found: {frames_dir}. Skipping split.")
+        return 0, 0
+        
+    frame_files = glob.glob(str(Path(frames_dir) / "*_frames.npz"))
+    
+    if not frame_files:
+        print(f"Warning: No *_frames.npz files found in {frames_dir}. Skipping split.")
+        return 0, 0
+        
     success_count = 0
     error_count = 0
+    skipped_count = 0
+    
+    Path(pose_dir).mkdir(parents=True, exist_ok=True)
     
     for frame_file in frame_files:
-        video_id = os.path.basename(frame_file).replace("_frames.npz", "")
+        video_id = Path(frame_file).stem.replace("_frames", "")
         
-        pose_output_path = os.path.join(pose_dir, f"{video_id}_pose.npz")
+        pose_output_path = Path(pose_dir) / f"{video_id}_pose.npz"
 
-        if os.path.exists(pose_output_path):
-            print(f"Skipping {video_id} - features already extracted")
+        if pose_output_path.exists():
+            skipped_count += 1
             success_count += 1
             continue
+            
         try:
-            result = process_video(video_id, frames_dir, pose_dir, anno_dir)
+            result = process_video(video_id, frames_dir, pose_dir, pose_config)
             if result:
                 success_count += 1
             else:
@@ -84,42 +90,58 @@ def process_dataset(frames_dir, anno_dir, pose_dir):
         except Exception as e:
             print(f"Error processing {video_id}: {str(e)}")
             error_count += 1
-    
+            
+    print(f"{split_name} data: {success_count} processed ({skipped_count} skipped), {error_count} errors")
     return success_count, error_count
 
 def main():
     parser = argparse.ArgumentParser(description="Extract pose features from videos")
+    parser.add_argument('--config', default='configs/config.yaml', help='Path to configuration file')
     parser.add_argument(
         "--split", 
         type=str, 
         choices=["train", "val", "test", "all"],
         default="all", 
-        help="Dataset split to process"
+        help="Dataset split to process (overrides config potentially, used for selection)"
     )
     args = parser.parse_args()
     
+    try:
+        with open(args.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Error: Config file not found at {args.config}")
+        return
+    except Exception as e:
+        print(f"Error loading config file: {e}")
+        return
+        
+    data_cfg = cfg['data']
+    feature_cfg = cfg['feature_extraction']
+    pose_cfg = feature_cfg['pose']
+    
+    base_processed_dir = Path(data_cfg['processed_dir'])
 
+    splits_to_process = []
     if args.split == "train" or args.split == "all":
-        print("Processing training data...")
-        train_success, train_error = process_dataset(
-            TRAIN_FRAMES_DIR, TRAIN_ANNO_DIR, TRAIN_POSE_DIR
-        )
-        print(f"Training data: {train_success} videos processed, {train_error} errors")
-    
+        splits_to_process.append("train")
     if args.split == "val" or args.split == "all":
-        print("Processing validation data...")
-        val_success, val_error = process_dataset(
-            VAL_FRAMES_DIR, VAL_ANNO_DIR, VAL_POSE_DIR
-        )
-        print(f"Validation data: {val_success} videos processed, {val_error} errors")
-
+        splits_to_process.append("val")
     if args.split == "test" or args.split == "all":
-        print("Processing testing data...")
-        test_success, test_error = process_dataset(
-            TEST_FRAMES_DIR, TEST_ANNO_DIR, TEST_POSE_DIR,)
-        print(f"Testing data: {test_success} videos processed, {test_error} errors")
+        splits_to_process.append("test")
+        
+    total_success = 0
+    total_errors = 0
     
-    print("Feature extraction complete!")
+    for split in splits_to_process:
+        frames_dir = base_processed_dir / split / "frames"
+        pose_dir = base_processed_dir / split / "pose"
+        
+        success, errors = process_dataset(split, frames_dir, pose_dir, pose_cfg)
+        total_success += success
+        total_errors += errors
+    
+    print(f"\nFeature extraction complete! Total processed: {total_success}, Total errors: {total_errors}")
 
 if __name__ == "__main__":
     main() 

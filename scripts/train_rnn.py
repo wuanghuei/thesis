@@ -8,6 +8,8 @@ import os
 import glob
 import argparse
 from tqdm import tqdm
+import yaml
+from pathlib import Path
 
 # Import the RNN model definition
 try:
@@ -17,33 +19,6 @@ except ImportError:
     print("Error: Could not import RNNPostProcessor from src/models/rnn_postprocessor.py")
     print("Please ensure the file exists and is in the correct directory.")
     exit()
-
-# ====== Configuration & Default Hyperparameters ======
-# Data paths (assuming data generated in Phase 1)
-TRAIN_DATA_DIR = "rnn_processed_data/train"
-VAL_DATA_DIR = "rnn_processed_data/val"
-CHECKPOINT_DIR = "rnn_checkpoints"
-
-# Model Hyperparameters (Defaults)
-INPUT_SIZE = 15       # 3 * NUM_CLASSES (assuming NUM_CLASSES=5)
-NUM_CLASSES_OUT = 6 # NUM_CLASSES + 1 (for background)
-HIDDEN_SIZE = 128
-NUM_LAYERS = 2
-DROPOUT_PROB = 0.5
-RNN_TYPE = 'lstm'     # 'lstm' or 'gru'
-BIDIRECTIONAL = True
-
-# Training Hyperparameters (Defaults)
-LEARNING_RATE = 1e-3
-BATCH_SIZE = 16      # Adjust based on GPU memory
-NUM_EPOCHS = 50
-PATIENCE = 5        # For early stopping
-NUM_WORKERS = 1      # Dataloader workers
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Ensure checkpoint directory exists
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
 # ====== Dataset Class ======
 class RNNDataset(Dataset):
@@ -156,117 +131,171 @@ def validate(model, dataloader, criterion, device):
 
 # ====== Main Training Script ======
 def main(args):
+
+    # --- Load Configuration ---
+    config_path = Path(args.config)
+    if not config_path.is_file():
+        print(f"❌ Error: Config file not found at {config_path}")
+        exit(1)
+    try:
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+            print(f"✅ Loaded configuration from {config_path}")
+    except Exception as e:
+        print(f"❌ Error loading config file {config_path}: {e}")
+        exit(1)
+
+    # --- Extract Config Sections ---
+    # Use .get() with default empty dicts to handle missing sections gracefully
+    global_cfg = cfg.get('global', {})
+    data_cfg = cfg.get('data', {})
+    rnn_cfg = cfg.get('rnn_training', {})
+
+    # --- Override Config with CLI Args ---
+    # Data paths (cannot be overridden by CLI in this setup, defined in config)
+    train_data_dir = Path(data_cfg.get('rnn_processed_data')/ 'train')
+    val_data_dir = Path(data_cfg.get('rnn_processed_data')/ 'val')
+    checkpoint_dir = Path(data_cfg.get('rnn_model_checkpoints'))
+    best_checkpoint_name = data_cfg.get('rnn_best_checkpoint_name', 'best_rnn_model.pth')
+
+
+    # Device configuration
+    device_str = global_cfg.get('device', 'auto').lower()
+    if device_str == 'auto':
+        DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        DEVICE = torch.device(device_str)
+
+    # Ensure checkpoint directory exists
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
     print(f"Using device: {DEVICE}")
-    print("--- Hyperparameters ---")
-    print(f"  RNN Type: {args.rnn_type}")
-    print(f"  Hidden Size: {args.hidden_size}")
-    print(f"  Num Layers: {args.num_layers}")
-    print(f"  Bidirectional: {args.bidirectional}")
-    print(f"  Dropout: {args.dropout_prob}")
-    print(f"  Batch Size: {args.batch_size}")
-    print(f"  Learning Rate: {args.lr}")
-    print(f"  Epochs: {args.epochs}")
-    print(f"-----------------------")
+    print("--- Data Configuration ---")
+    print(f"  Train Data: {train_data_dir}")
+    print(f"  Val Data: {val_data_dir}")
+    print(f"  Checkpoints: {checkpoint_dir}")
+    print("--- Model Hyperparameters ---")
+    print(f"  RNN Type: {rnn_cfg['model']['type']}")
+    print(f"  Input Size: {rnn_cfg['model']['input_size']}")
+    print(f"  Num Classes: {rnn_cfg['model']['num_classes']}")
+    print(f"  Hidden Size: {rnn_cfg['model']['hidden_size']}")
+    print(f"  Num Layers: {rnn_cfg['model']['num_layers']}")
+    print(f"  Bidirectional: {rnn_cfg['model']['bidirectional']}")
+    print(f"  Dropout: {rnn_cfg['model']['dropout_prob']}")
+    print("--- Training Hyperparameters ---")
+    print(f"  Batch Size: {rnn_cfg['batch_size']}")
+    print(f"  Learning Rate: {rnn_cfg['optimizer']['lr']}")
+    print(f"  Epochs: {rnn_cfg['epochs']}")
+    print(f"  Patience: {rnn_cfg['early_stopping']['patience']}")
+    print(f"  Num Workers: {rnn_cfg['dataloader']['num_workers']}")
+    print(f"-----------------------------")
 
     # Load Datasets
     try:
-        train_dataset = RNNDataset(TRAIN_DATA_DIR)
-        val_dataset = RNNDataset(VAL_DATA_DIR)
+        # Pass paths directly
+        train_dataset = RNNDataset(str(train_data_dir))
+        val_dataset = RNNDataset(str(val_data_dir))
     except FileNotFoundError as e:
         print(f"Error: {e}")
         print("Please ensure Phase 1 (1_generate_rnn_data.py) completed successfully and data exists.")
         exit()
-        
+
     # Create DataLoaders
-    train_loader = DataLoader(train_dataset, 
-                              batch_size=args.batch_size, 
-                              shuffle=True, 
-                              collate_fn=collate_fn, 
-                              num_workers=args.num_workers)
-    val_loader = DataLoader(val_dataset, 
-                            batch_size=args.batch_size * 2, # Often use larger batch for validation
-                            shuffle=False, 
-                            collate_fn=collate_fn, 
-                            num_workers=args.num_workers)
+    # Make validation batch size configurable or keep fixed factor?
+    val_batch_size = train_cfg.get('val_batch_size', train_cfg['batch_size'] * 2)
+    train_loader = DataLoader(train_dataset,
+                              batch_size=train_cfg['batch_size'],
+                              shuffle=True,
+                              collate_fn=collate_fn,
+                              num_workers=train_cfg['num_workers'])
+    val_loader = DataLoader(val_dataset,
+                            batch_size=val_batch_size,
+                            shuffle=False,
+                            collate_fn=collate_fn,
+                            num_workers=train_cfg['num_workers'])
 
     # Initialize Model
     model = RNNPostProcessor(
-        input_size=INPUT_SIZE,
-        hidden_size=args.hidden_size,
-        num_layers=args.num_layers,
-        num_classes=NUM_CLASSES_OUT,
-        rnn_type=args.rnn_type,
-        dropout_prob=args.dropout_prob,
-        bidirectional=args.bidirectional
+        input_size=rnn_cfg['model']['input_size'],
+        hidden_size=rnn_cfg['model']['hidden_size'],
+        num_layers=rnn_cfg['model']['num_layers'],
+        num_classes=rnn_cfg['model']['num_classes'],
+        rnn_type=rnn_cfg['model']['type'],
+        dropout_prob=rnn_cfg['model']['dropout_prob'],
+        bidirectional=rnn_cfg['model']['bidirectional']
     ).to(DEVICE)
 
     # Loss and Optimizer
     # Use ignore_index=-100 for padded values in labels
-    criterion = nn.CrossEntropyLoss(ignore_index=-100) 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
-    # Optional: Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=args.patience // 2, verbose=True)
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    optimizer = optim.AdamW(model.parameters(), lr=rnn_cfg['optimizer']['lr'])
+
+    # Optional: Learning rate scheduler - make config more detailed if needed
+    scheduler_factor = rnn_cfg['scheduler']['factor']
+    # Calculate scheduler patience based on training patience
+    scheduler_patience = rnn_cfg['scheduler']['patience']
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min',
+                                                     factor=scheduler_factor,
+                                                     patience=scheduler_patience,
+                                                     verbose=True)
 
     # Training Loop
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
-    print("\nStarting Training...")
-    for epoch in range(args.epochs):
-        print(f"\n--- Epoch {epoch+1}/{args.epochs} ---")
-        
+    print("Starting Training...")
+    for epoch in range(rnn_cfg['epochs']): # Use config epochs
+        print(f"--- Epoch {epoch+1}/{rnn_cfg['epochs']} ---")
+
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE)
         print(f"  Average Training Loss: {train_loss:.4f}")
-        
+
         val_loss = validate(model, val_loader, criterion, DEVICE)
         print(f"  Average Validation Loss: {val_loss:.4f}")
-        
+
         # Update LR scheduler
         scheduler.step(val_loss)
-        
+
         # Save best model
         if val_loss < best_val_loss:
             print(f"  Validation loss improved ({best_val_loss:.4f} -> {val_loss:.4f}). Saving model...")
             best_val_loss = val_loss
-            checkpoint_path = os.path.join(CHECKPOINT_DIR, 'best_rnn_model.pth')
-            torch.save({
+            # Use Path object and config name
+            checkpoint_path = checkpoint_dir / best_checkpoint_name
+            save_dict = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': best_val_loss,
-                # Store hyperparameters used for this checkpoint
-                'args': vars(args) 
-            }, checkpoint_path)
+                # Store relevant config sections for reproducibility
+                'config': {
+                    'rnn_training': rnn_cfg,
+                    'data': data_cfg # Include data paths used
+                 }
+            }
+            torch.save(save_dict, checkpoint_path)
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
-            print(f"  Validation loss did not improve. Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{args.patience} epochs without improvement)")
-            
+            print(f"  Validation loss did not improve. Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{train_cfg['patience']} epochs without improvement)")
+
         # Early stopping
-        if epochs_no_improve >= args.patience:
-            print(f"\nEarly stopping triggered after {args.patience} epochs without improvement.")
+        if epochs_no_improve >= rnn_cfg['patience']: # Use config patience
+            print(f"Early stopping triggered after {rnn_cfg['patience']} epochs without improvement.")
             break
 
-    print("\nTraining finished.")
+    print("Training finished.")
     print(f"Best validation loss achieved: {best_val_loss:.4f}")
-    print(f"Best model saved to: {os.path.join(CHECKPOINT_DIR, 'best_rnn_model.pth')}")
+    # Use Path object and config name
+    print(f"Best model saved to: {checkpoint_dir / best_checkpoint_name}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 3: Train RNN Post-Processor")
-    
-    # Model args
-    parser.add_argument("--rnn_type", type=str, default=RNN_TYPE, choices=['lstm', 'gru'], help="Type of RNN layer")
-    parser.add_argument("--hidden_size", type=int, default=HIDDEN_SIZE, help="Number of hidden units in RNN")
-    parser.add_argument("--num_layers", type=int, default=NUM_LAYERS, help="Number of RNN layers")
-    parser.add_argument("--dropout_prob", type=float, default=DROPOUT_PROB, help="Dropout probability")
-    parser.add_argument("--bidirectional", action=argparse.BooleanOptionalAction, default=BIDIRECTIONAL, help="Use bidirectional RNN")
 
-    # Training args
-    parser.add_argument("--lr", type=float, default=LEARNING_RATE, help="Learning rate")
-    parser.add_argument("--batch_size", type=int, default=BATCH_SIZE, help="Batch size for training")
-    parser.add_argument("--epochs", type=int, default=NUM_EPOCHS, help="Maximum number of training epochs")
-    parser.add_argument("--patience", type=int, default=PATIENCE, help="Patience for early stopping")
-    parser.add_argument("--num_workers", type=int, default=NUM_WORKERS, help="Number of dataloader workers")
+    # --- Config File Argument ---
+    parser.add_argument("--config", type=str, default="configs/config.yaml",
+                        help="Path to the YAML configuration file.")
+
 
     args = parser.parse_args()
     main(args) 

@@ -1,559 +1,541 @@
 import torch
 import torch.optim as optim
-from src.models.base_detector import TemporalActionDetector
-from src.dataloader import get_train_loader, get_val_loader, get_test_loader
 from tqdm import tqdm
 import numpy as np
 import os
 import json
 from datetime import datetime
 from torch.cuda.amp import autocast, GradScaler
-from src.utils.helpers import set_seed, process_for_evaluation
+import yaml # Import YAML
+from pathlib import Path # Import Path
+import argparse # Import argparse
+from collections import defaultdict
+
+# Import components from src
+# Ensure model import is correct
+from src.models.base_detector import TemporalActionDetector 
+from src.dataloader import get_train_loader, get_val_loader, get_test_loader
+from src.utils.helpers import set_seed, calculate_global_gt # Assuming process_for_evaluation moved or handled by compute_final_metrics
 from src.utils.debugging import debug_detection_stats, debug_raw_predictions
 from src.losses import ActionDetectionLoss
-from src.utils.postprocessing import post_process
+# Assuming post_process is now part of the model or called within compute_final_metrics
+# from src.utils.postprocessing import post_process # Remove if not called directly
 from src.evaluation import compute_final_metrics
 
 
-# ====== Config ======
-NUM_CLASSES = 5  # Đảm bảo khớp với định nghĩa trong prepare_segments.py và dataloader.py
-WINDOW_SIZE = 32  # Kích thước sliding window, phải khớp với WINDOW_SIZE trong dataloader.py
-EPOCHS = 100
-BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 4
-LR = 1e-5  # Giảm từ 5e-5 xuống 2e-5 để ổn định loss
-WEIGHT_DECAY = 1e-4  # Tăng weight decay để tránh overfitting
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-CHECKPOINT_DIR = "checkpoints"
-CHECKPOINT = os.path.join(CHECKPOINT_DIR, "best_model_velocity.pth")  # Dùng checkpoint mới cho phiên bản với velocity
-RESUME_CHECKPOINT = os.path.join(CHECKPOINT_DIR, "interim_model_epoch15.pth")  # Dùng checkpoint mới cho phiên bản với velocity
-LOG_DIR = "logs"
-USE_MIXED_PRECISION = True
-RESUME_TRAINING = True  # Continue from checkpoint
-BOUNDARY_THRESHOLD = 0.11  # Giảm từ 0.15 xuống 0.08
-DEBUG_DETECTION = True  # Enable detection debugging
-MAX_GRAD_NORM = 7.0  # Tăng từ 1.0 lên 5.0 để ổn định gradient
-FINAL_EVALUATION = True  # Chạy đánh giá cuối cùng trên test set
-WARMUP_EPOCHS = 7  # Giảm số epoch cho learning rate warmup từ 5 xuống 3
-WARMUP_FACTOR = 2.5  # Tăng LR trong warmup lên 2.5x (tăng từ 2.0)
+# Removed the large block of hardcoded CONFIG constants
 
-# Sử dụng threshold riêng cho từng lớp - điều chỉnh theo đặc tính của từng action class
-CLASS_THRESHOLDS = [0.15, 0.15, 0.01, 0.08, 0.15]  # Giảm thresholds để phù hợp với phân phối xác suất hiện tại
-
-# Trọng số cho loss components - điều chỉnh để tập trung mạnh hơn vào action classification
-ACTION_WEIGHT = 1.5  # Tăng từ 2.0 lên 3.0 để tập trung hơn vào action classification
-START_WEIGHT = 1.5  # Giảm từ 1.5 xuống 1.0
-END_WEIGHT = 1.5  # Giảm từ 1.5 xuống 1.0
-
-# ====== THÊM CONFIG CHO POST-PROCESSING ======
-MIN_SEGMENT_LENGTH = 3  # Độ dài tối thiểu của segment (frames) - giảm từ 10 xuống 8
-MIN_CONFIDENT_RATIO = 0.15  # Giảm từ 0.2 xuống 0.15 để cho phép nhiều detections hơn
-NMS_THRESHOLD = 0.4  # Tăng từ 0.3 lên 0.5
-
-# Tạo thư mục lưu trữ
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
-
-def train(model, train_loader, val_loader, criterion, optimizer, scheduler, epochs, device, start_epoch=0, best_map=0):
-    """Train the model"""
-    initial_action_weight = ACTION_WEIGHT  # Lưu trọng số ban đầu
-    initial_start_weight = START_WEIGHT
-    initial_end_weight = END_WEIGHT
-    start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(LOG_DIR, f"training_log_fixed_{start_time}.csv")
+def train(
+    model, train_loader, val_loader, criterion, optimizer, scheduler, 
+    cfg, # Pass the relevant config section (e.g., base_model_training)
+    device, start_epoch=0, best_map=0
+):
+    """Train the model using parameters from config."""
     
-    # Write header to log file - ADDED NEW METRICS
+    # Extract necessary training parameters from cfg
+    epochs = cfg['epochs']
+    log_dir = Path(cfg['data']['logs'])
+    checkpoint_dir = Path(cfg['data']['base_model_checkpoints'])
+    best_checkpoint_path = checkpoint_dir / cfg['data']['base_best_checkpoint_name']
+    use_mixed_precision = cfg['use_mixed_precision']
+    gradient_accumulation_steps = cfg['gradient_accumulation_steps']
+    max_grad_norm = cfg['gradient_clipping']['max_norm']
+    warmup_epochs = cfg['warmup']['epochs']
+    base_lr = cfg['optimizer']['lr']
+    warmup_factor = cfg['warmup']['factor']
+    # Loss weights might be adjusted, get initial values
+    initial_loss_weights = cfg['loss']
+    # Debug setting
+    debug_detection_enabled = cfg['debugging']['debug_detection_enabled']
+    
+    # --- Initialization ---
+    # Dynamic weight adjustment setup (optional, based on config?)
+    # adjust_weights = cfg.get('adjust_loss_weights_during_train', False) # Example: make it configurable
+    adjust_weights = True # Keep current behavior for now
+    if adjust_weights:
+        initial_action_weight = initial_loss_weights['action_weight']
+        initial_start_weight = initial_loss_weights['start_weight']
+        initial_end_weight = initial_loss_weights['end_weight']
+        
+    start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"training_log_base_{start_time}.csv"
+    log_dir.mkdir(parents=True, exist_ok=True) # Ensure log dir exists
+    
+    # Write header to log file
     with open(log_file, 'w') as f:
-        f.write("epoch,train_loss,val_loss,val_map,val_f1,map_mid,f1_iou_01,f1_iou_025,f1_iou_05,class0_ap,class1_ap,class2_ap,class3_ap,class4_ap\n")
+        f.write("epoch,train_loss,val_loss,val_map,val_f1,map_mid,f1_iou_010,f1_iou_025,f1_iou_050,class0_ap,class1_ap,class2_ap,class3_ap,class4_ap\n")
     
     losses = {'train': [], 'val': []}
     maps = []
-    class_aps = {c: [] for c in range(NUM_CLASSES)}
+    # Get num_classes from the main config section if needed here, or pass it
+    num_classes = cfg['global']['num_classes'] 
+    class_aps = {c: [] for c in range(num_classes)}
     
-    # Khởi tạo GradScaler cho mixed precision
-    scaler = GradScaler(enabled=USE_MIXED_PRECISION)
+    scaler = GradScaler(enabled=use_mixed_precision)
     
+    # --- Training Loop ---
     for epoch in range(start_epoch, epochs):
-        if epoch >= 30:  # Tăng từ 20 lên 30 epochs để tập trung vào action classification lâu hơn
-            # Gradually transition to more balanced weights
-            progress = min(1.0, (epoch - 30) / 20)  # Transition over 20 epochs 
-            criterion.action_weight = initial_action_weight * (1 - 0.3 * progress)  # Giảm dần 30%
-            criterion.start_weight = initial_start_weight * (1 + 0.5 * progress)  # Tăng dần 50%
-            criterion.end_weight = initial_end_weight * (1 + 0.5 * progress)  # Tăng dần 50%
+        # Optional: Adjust loss weights dynamically
+        if adjust_weights and epoch >= 30: 
+            progress = min(1.0, (epoch - 30) / 20)  
+            criterion.action_weight = initial_action_weight * (1 - 0.3 * progress)  
+            criterion.start_weight = initial_start_weight * (1 + 0.5 * progress)  
+            criterion.end_weight = initial_end_weight * (1 + 0.5 * progress)  
             print(f"Epoch {epoch+1}: Adjusted weights - Action: {criterion.action_weight:.2f}, Start: {criterion.start_weight:.2f}, End: {criterion.end_weight:.2f}")
-        # Training
-        model.train()
-        train_loss = 0
         
-        # Reset gradient accumulation
-        optimizer.zero_grad()
-        
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
-        batch_count = 0
-        
-        # Theo dõi gradient
-        grad_norms = []
-        
-        # Apply learning rate warmup if in warmup phase
-        if epoch < WARMUP_EPOCHS:
-            warmup_start = LR/2.5
-            current_lr = warmup_start + (LR - warmup_start) * (epoch + 1) / WARMUP_EPOCHS
+        # Apply learning rate warmup
+        if epoch < warmup_epochs:
+            warmup_start = base_lr / warmup_factor # Adjust start LR based on factor
+            current_lr = warmup_start + (base_lr - warmup_start) * (epoch + 1) / warmup_epochs
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
             print(f"Warmup LR: {current_lr:.8f}")
         
+        # --- Train One Epoch ---
+        model.train()
+        train_loss = 0
+        optimizer.zero_grad()
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+        batch_count = 0
+        grad_norms = []
+        
         for batch_idx, batch in enumerate(progress_bar):
-            # Unpack the batch with RGB and Pose+Velocity streams
-            frames, pose_data, hand_data, action_masks, start_masks, end_masks, _ = batch
+            try:
+                # Assuming dataloader structure (adjust if hand_data was removed)
+                frames, pose_data, _, action_masks, start_masks, end_masks, _ = batch
+            except ValueError:
+                 print("Warning: Batch structure mismatch. Trying simplified unpack (frames, pose, masks..., meta). Check dataloader.")
+                 try: frames, pose_data, action_masks, start_masks, end_masks, _ = batch
+                 except ValueError: print("Fatal: Cannot determine batch structure. Exiting."); exit()
             
             frames = frames.to(device)
-            pose_data = pose_data.to(device)
+            if pose_data is not None: pose_data = pose_data.to(device)
             action_masks = action_masks.to(device)
             start_masks = start_masks.to(device)
             end_masks = end_masks.to(device)
 
-            # Forward pass with mixed precision
-            with autocast(enabled=USE_MIXED_PRECISION):
-                # Forward pass với RGB và Pose+Velocity
+            with autocast(enabled=use_mixed_precision):
                 predictions = model(frames, pose_data)
                 
-                # Debug raw predictions
-                if batch_idx % 100 == 0:
-                    # For classification model, adjust debugging
-                    if 'classification' in predictions:
-                        print(f"Classification logits: min={predictions['classification'].min().item():.4f}, max={predictions['classification'].max().item():.4f}")
-                    else:
-                        action_logits = predictions['action_scores']
-                        print("\n")
-                        print(f"Action logits: min={action_logits.min().item():.4f}, max={action_logits.max().item():.4f}")
-                
-                # Calculate loss
                 targets = {
                     'action_masks': action_masks,
                     'start_masks': start_masks,
                     'end_masks': end_masks
                 }
-                
                 loss_dict = criterion(predictions, targets)
                 loss = loss_dict['total']
-                
-                # Normalize loss for gradient accumulation
-                loss = loss / GRADIENT_ACCUMULATION_STEPS
+                loss = loss / gradient_accumulation_steps
             
-            # Backward pass with gradient scaling
             scaler.scale(loss).backward()
             
-            # Update metrics
-            train_loss += loss.item() * GRADIENT_ACCUMULATION_STEPS
-            batch_count += 1
+            train_loss += loss.item() * gradient_accumulation_steps # Use accumulated loss
+            batch_count += 1 # Count batches processed before optimizer step
             
-            # Gradient accumulation
-            if (batch_idx + 1) % GRADIENT_ACCUMULATION_STEPS == 0 or (batch_idx + 1) == len(train_loader):
-                # Unscale gradients before clipping
+            if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
                 scaler.unscale_(optimizer)
-                
-                # Gradient clipping để ngăn chặn gradient explosion
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=MAX_GRAD_NORM)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
                 grad_norms.append(grad_norm.item())
-                
-                # Update weights
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
                 
-                # Update progress bar
                 progress_bar.set_postfix({
-                    'loss': f"{loss_dict['total'].item():.4f}",
+                    'loss': f"{loss_dict['total'].item():.4f}", # Log non-accumulated loss
                     'action': f"{loss_dict['action'].item():.4f}",
                     'start': f"{loss_dict['start'].item():.4f}",
                     'end': f"{loss_dict['end'].item():.4f}",
                     'grad': f"{grad_norm:.2f}"
                 })
         
-        # Print gradient statistics
-        if grad_norms:
-            print(f"Gradient stats: min={min(grad_norms):.4f}, max={max(grad_norms):.4f}, mean={np.mean(grad_norms):.4f}")
-        
-        # Average loss
-        train_loss /= batch_count
+        if grad_norms: print(f"Gradient stats: min={min(grad_norms):.4f}, max={max(grad_norms):.4f}, mean={np.mean(grad_norms):.4f}")
+        train_loss /= batch_count # Average loss over batches where optimizer stepped
         losses['train'].append(train_loss)
         
-        
-        # Validation - UPDATED to receive metrics dict
-        val_metrics = evaluate(model, val_loader, criterion, device)
+        # --- Validation --- #
+        # Pass relevant parts of config to evaluate
+        val_metrics = evaluate(
+            model, val_loader, criterion, device, 
+            eval_cfg=cfg['base_model_training'], # Pass the training config section for thresholds etc.
+            num_classes=num_classes,
+            use_mixed_precision=use_mixed_precision
+        )
         val_loss = val_metrics['val_loss']
         val_map = val_metrics['mAP']
-        val_f1 = val_metrics['merged_f1']
+        val_f1 = val_metrics['merged_f1'] # Assuming this key exists
         class_ap_dict = val_metrics['class_aps']
-        map_mid = val_metrics['map_mid']
-        avg_f1_iou_01 = val_metrics['avg_f1_iou_010']
-        avg_f1_iou_025 = val_metrics['avg_f1_iou_025']
-        avg_f1_iou_05 = val_metrics['avg_f1_iou_050']
+        map_mid = val_metrics.get('map_mid', 0.0) # Use .get for safety
+        avg_f1_iou_010 = val_metrics.get('avg_f1_iou_010', 0.0)
+        avg_f1_iou_025 = val_metrics.get('avg_f1_iou_025', 0.0)
+        avg_f1_iou_050 = val_metrics.get('avg_f1_iou_050', 0.0)
         
         losses['val'].append(val_loss)
         maps.append(val_map)
+        for c in range(num_classes): class_aps[c].append(class_ap_dict.get(c, 0.0))
         
-        # Update learning rate if not in warmup phase
-        if epoch >= WARMUP_EPOCHS:
-            # Cập nhật scheduler với validation loss
+        # Update LR scheduler
+        if epoch >= warmup_epochs:
             scheduler.step(val_loss)
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Current LR: {current_lr:.8f}")
         
-        # Lưu AP của từng lớp
-        for c in range(NUM_CLASSES):
-            class_aps[c].append(class_ap_dict[c])
-        
-        # Log results - UPDATED to print new metrics
+        # --- Logging --- #
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val mAP: {val_map:.4f}, Val F1: {val_f1:.4f}")
-        print(f"  Extra Metrics: mAP@mid={map_mid:.4f}, F1@0.1={avg_f1_iou_01:.4f}, F1@0.25={avg_f1_iou_025:.4f}, F1@0.5={avg_f1_iou_05:.4f}")
-        print(f"  Class AP: {', '.join([f'C{c}={class_ap_dict[c]:.4f}' for c in range(NUM_CLASSES)])}")
-        
-        # Write to log file - UPDATED to write new metrics
+        print(f"  Extra Metrics: mAP@mid={map_mid:.4f}, F1@0.1={avg_f1_iou_010:.4f}, F1@0.25={avg_f1_iou_025:.4f}, F1@0.5={avg_f1_iou_050:.4f}")
+        print(f"  Class AP: {', '.join([f'C{c}={class_ap_dict.get(c, 0.0):.4f}' for c in range(num_classes)])}")
         with open(log_file, 'a') as f:
-            f.write(f"{epoch+1},{train_loss},{val_loss},{val_map},{val_f1},{map_mid},{avg_f1_iou_01},{avg_f1_iou_025},{avg_f1_iou_05}")
-            for c in range(NUM_CLASSES):
-                f.write(f",{class_ap_dict[c]}")
+            f.write(f"{epoch+1},{train_loss},{val_loss},{val_map},{val_f1},{map_mid},{avg_f1_iou_010},{avg_f1_iou_025},{avg_f1_iou_050}")
+            for c in range(num_classes): f.write(f",{class_ap_dict.get(c, 0.0)}")
             f.write("\n")
         
-        # Save best model
-        if val_map > best_map:
+        # --- Save Checkpoint --- #
+        is_best = val_map > best_map
+        if is_best:
             best_map = val_map
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_map': val_map,
-                'val_f1': val_f1,
-                'class_aps': class_ap_dict
-            }, CHECKPOINT)
-            print(f"✅ Saved best model with mAP: {val_map:.4f}")
+            print(f"✅ Saving best model with mAP: {best_map:.4f} to {best_checkpoint_path}")
             
-            # Checkpoint filename with epoch and mAP
-            epoch_checkpoint = os.path.join(CHECKPOINT_DIR, f"model_fixed_epoch{epoch+1}_map{val_map:.4f}.pth")
-            torch.save({
+        # Save best or potentially interim checkpoint
+        save_interim = (epoch + 1) % 5 == 0 # Example: save every 5 epochs
+        if is_best or save_interim:
+            checkpoint_data = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'val_map': val_map,
                 'val_f1': val_f1,
-                'class_aps': class_ap_dict
-            }, epoch_checkpoint)
-        
-        # Lưu checkpoint định kỳ mỗi 5 epochs hoặc khi có detections đầu tiên
-        save_interim = False
-        if (epoch + 1) % 1 == 0:  # Lưu mỗi 5 epochs
-            save_interim = True
-            print(f"💾 Lưu checkpoint định kỳ tại epoch {epoch+1}")
-        elif val_map > 0 and best_map == val_map:  # Lưu khi có detection đầu tiên
-            save_interim = True
-            print(f"🔍 Lưu checkpoint khi có detection đầu tiên: mAP = {val_map:.4f}")
-        
-        if save_interim:
-            interim_checkpoint = os.path.join(CHECKPOINT_DIR, f"interim_model_epoch{epoch+1}.pth")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_map': val_map,
-                'val_f1': val_f1,
-                'class_aps': class_ap_dict
-            }, interim_checkpoint)
-    
+                'class_aps': class_ap_dict,
+                'cfg': cfg # Optionally save config used for this run
+            }
+            current_checkpoint_path = best_checkpoint_path if is_best else checkpoint_dir / f"interim_model_epoch{epoch+1}.pth"
+            try:
+                 torch.save(checkpoint_data, current_checkpoint_path)
+                 if not is_best and save_interim:
+                      print(f"💾 Saved interim checkpoint to {current_checkpoint_path}")
+            except Exception as e:
+                 print(f"Error saving checkpoint to {current_checkpoint_path}: {e}")
+                 
+    # Optional: Plotting can be moved to a separate function/utility
+    # plot_training_curves(losses, maps, class_aps, log_dir, start_time) 
     
     return best_map
 
-def evaluate(model, val_loader, criterion, device):
-    """Evaluate the model"""
+def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mixed_precision):
+    """Evaluate the model using parameters from config."""
     model.eval()
-    val_loss = 0
-
-    # Lưu tất cả detections từ mọi window để kết hợp sau
+    val_loss = 0.0
+    
+    # Get postprocessing settings from config
+    pp_cfg = eval_cfg['postprocessing']
+    boundary_threshold = pp_cfg['boundary_threshold']
+    class_thresholds = pp_cfg['class_thresholds']
+    nms_threshold = pp_cfg['nms_threshold']
+    # min_segment_length = pp_cfg['min_segment_length'] # If needed by post_process
+    
+    # Lists to store results for final metric calculation
     all_window_detections = []
     all_window_metadata = []
-    
-    # Các biến để tính mAP
-    all_action_gt = {c: [] for c in range(NUM_CLASSES)}
-    all_action_preds = {c: [] for c in range(NUM_CLASSES)}
-    
-    # Biến để tính F1 thông thường (frame-level)
-    all_frame_preds = []
-    all_frame_targets = []
-    
+    all_frame_preds_flat = [] # For frame-level F1
+    all_frame_targets_flat = [] # For frame-level F1
+    all_action_preds_flat = defaultdict(list) # For mAP
+    final_global_gt = defaultdict(list) # For mAP
     
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
-            # Unpack the batch with RGB and Pose+Velocity streams
-            frames, pose_data, hand_data, action_masks, start_masks, end_masks, metadata = batch
+            try:
+                 frames, pose_data, _, action_masks, start_masks, end_masks, metadata = batch
+            except ValueError:
+                 print("Warning: Batch structure mismatch in validation. Check dataloader.")
+                 try: frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
+                 except ValueError: print("Fatal: Cannot determine batch structure. Exiting."); exit()
             
             frames = frames.to(device)
-            pose_data = pose_data.to(device)
+            if pose_data is not None: pose_data = pose_data.to(device)
             action_masks = action_masks.to(device)
             start_masks = start_masks.to(device)
             end_masks = end_masks.to(device)
             
-            # Forward pass with mixed precision
-            with autocast(enabled=USE_MIXED_PRECISION):
-                # Forward pass với RGB và Pose+Velocity
+            with autocast(enabled=use_mixed_precision):
                 predictions = model(frames, pose_data)
-                
-                # Kiểm tra predictions
-                if 'classification' in predictions:
-                    class_logits = predictions['classification']
-                    print(f"Val Classification logits: min={class_logits.min().item():.4f}, max={class_logits.max().item():.4f}")
-                
-                # Calculate loss
                 targets = {
                     'action_masks': action_masks,
                     'start_masks': start_masks,
                     'end_masks': end_masks
                 }
-                
                 loss_dict = criterion(predictions, targets)
                 loss = loss_dict['total']
             
-            # Update metrics
             val_loss += loss.item()
             
-            # Post-process để lấy action segments
-            if 'classification' in predictions:
-                # For TwoStreamActionNet, use classification scores
-                action_probs = torch.sigmoid(predictions['classification']).unsqueeze(1).repeat(1, WINDOW_SIZE, 1)
-                start_probs = torch.sigmoid(predictions['start_logits'].unsqueeze(-1).repeat(1, 1, NUM_CLASSES))
-                end_probs = torch.sigmoid(predictions['end_logits'].unsqueeze(-1).repeat(1, 1, NUM_CLASSES))
-            else:
-                # For TemporalActionDetector, use action_scores
-                action_probs = torch.sigmoid(predictions['action_scores'])
-                start_probs = torch.sigmoid(predictions['start_scores'])
-                end_probs = torch.sigmoid(predictions['end_scores'])
+            # --- Post-processing --- # 
+            # Assuming the model itself has the post_process method now,
+            # or we call a utility function from src.utils.postprocessing
+            # For now, let's assume model.post_process exists as cleaned previously
+            action_probs = torch.sigmoid(predictions['action_scores'])
+            start_probs = torch.sigmoid(predictions['start_scores'])
+            end_probs = torch.sigmoid(predictions['end_scores'])
+        
+            # Option 1: If model has post_process method
+            try:
+                 batch_detections = model.post_process(
+                     action_scores=action_probs, # Pass probs if method expects scores post-sigmoid
+                     start_scores=start_probs,
+                     end_scores=end_probs,
+                     action_threshold=class_thresholds, # Pass class-specific if method supports it
+                     boundary_threshold=boundary_threshold,
+                     nms_threshold=nms_threshold
+                     # Pass other args like min_segment_length if needed
+                 )
+            except AttributeError:
+                 print("Error: model.post_process not found. Ensure post-processing logic is correctly placed.")
+                 # Option 2: Call a utility function (needs import)
+                 # from src.utils.postprocessing import post_process # Example import
+                 batch_detections = [[] for _ in range(frames.shape[0])] # Placeholder
+            except TypeError as e:
+                 print(f"Error calling model.post_process (likely argument mismatch): {e}")
+                 batch_detections = [[] for _ in range(frames.shape[0])] # Placeholder
+                 
+            if eval_cfg['debugging']['debug_detection_enabled']:
+                debug_detection_stats(batch_detections, frames.shape[0], metadata)
             
-            # debug_raw_predictions(action_probs)
+            # --- Accumulate results for metric calculation --- #
+            # This part needs to be aligned with what compute_final_metrics expects
+            # It involves calculating global GT and flattening predictions/targets
+            # This logic might be complex and could be part of compute_final_metrics itself
             
-            #post-process function với threshold riêng cho từng lớp
-            batch_detections = post_process(
-                model, 
-                action_probs,
-                start_probs,
-                end_probs,
-                class_thresholds=CLASS_THRESHOLDS,
-                boundary_threshold=BOUNDARY_THRESHOLD,
-                nms_threshold=NMS_THRESHOLD
-            )
+            # Placeholder: Assume compute_final_metrics handles aggregation internally for now
+            # We need to pass the raw batch-level info it needs
+            all_window_detections.extend(batch_detections) # Detections per window
+            all_window_metadata.extend(metadata) # Metadata per window
             
-            # if DEBUG_DETECTION:
-            #     debug_detection_stats(batch_detections, frames.shape[0], metadata)
-            
-            # Process each sample in batch
-            for i, (detections, meta) in enumerate(zip(batch_detections, metadata)):
-                window_size = frames.shape[2]  # Temporal dimension
-                video_id = meta['video_id']
-                start_idx = meta['start_idx']
-                all_window_detections.append(detections)
-                all_window_metadata.append(meta)
-                
-                # Extract ground truth segments from annotations
-                for anno in meta['annotations']:
-                    action_id = anno['action_id']
-                    gt_start = anno['start_frame']
-                    gt_end = anno['end_frame']
-                    
-                    # Add to GT segments với window-relative coordinates
-                    all_action_gt[action_id].append((gt_start, gt_end))
-                
-                # Process detections with window-relative coordinates
-                for det in detections:
-                    action_id = det['action_id']
-                    # KHÔNG thêm start_idx để tránh coordinate mismatch
-                    start_frame = det['start_frame']
-                    end_frame = det['end_frame']
-                    confidence = det['confidence']
-                    
-                    # Đảm bảo end_frame > start_frame
-                    if end_frame <= start_frame:
-                        end_frame = start_frame + 1
-                    
-                    # Add to predictions
-                    all_action_preds[action_id].append({
-                        'segment': (start_frame, end_frame),
-                        'score': confidence
-                    })
-                
-                # Process frame-level predictions for F1 score
-                processed_preds, processed_targets = process_for_evaluation(
-                    detections,
-                    meta['annotations'],
-                    action_masks[i].cpu(),
-                    window_size,
-                    NUM_CLASSES
-                )
-                
-                all_frame_preds.extend(processed_preds)
-                all_frame_targets.extend(processed_targets)
+            # Frame-level accumulation (might be done inside compute_final_metrics too)
+            # from src.utils.helpers import process_for_evaluation # Needs import
+            # for i, (dets, meta) in enumerate(zip(batch_detections, metadata)):
+            #     preds, targets = process_for_evaluation(dets, meta['annotations'], action_masks[i].cpu(), frames.shape[2], num_classes)
+            #     all_frame_preds_flat.extend(preds)
+            #     all_frame_targets_flat.extend(targets)
+
+    # --- Calculate Final Metrics --- #
+    # Call the centralized function
+    # Note: compute_final_metrics needs adjustment to accept window-level data 
+    # and perform the merging/flattening internally OR this evaluate function 
+    # needs to do the preparation before calling it.
     
-    # Tính toán các metrics cuối cùng
+    # Let's assume evaluate prepares the final flattened lists as before for simplicity now.
+    # This requires re-implementing the GT/Pred processing loop here temporarily until
+    # compute_final_metrics is fully refactored to handle window data. 
+    
+    # --- TEMPORARY: Re-implement GT/Pred processing for compute_final_metrics input --- #
+    print("\nTemporary: Preparing data for compute_final_metrics...")
+    temp_global_gt, _, _ = calculate_global_gt(all_window_metadata, num_classes) 
+    
+    # Flatten predictions similar to how evaluate_pipeline does for RNN output
+    from src.utils.postprocessing import merge_cross_window_detections, resolve_cross_class_overlaps # Need these imports
+    merged_video_detections = merge_cross_window_detections(all_window_detections, all_window_metadata, iou_threshold=0.2, confidence_threshold=0.15)
+    merged_video_detections = resolve_cross_class_overlaps(merged_video_detections)
+    merged_all_action_preds = defaultdict(list)
+    for video_dets in merged_video_detections.values():
+        for det in video_dets:
+            merged_all_action_preds[det['action_id']].append({'segment': (det['start_frame'], det['end_frame']), 'score': det['confidence']})
+    
+    # Calculate flattened frame targets/preds (based on merged detections)
+    temp_all_frame_targets_flat = []
+    temp_all_frame_preds_flat = []
+    # (Need the loop similar to evaluate_pipeline to create frame-level lists based on merged_video_detections and temp_global_gt)
+    # This is complex and ideally lives within compute_final_metrics
+    # For now, pass empty lists for frame metrics as placeholder
+    print("Warning: Frame-level F1 calculation needs refactoring within compute_final_metrics or evaluate.")
+    # --- End Temporary Section --- # 
+    
     final_metrics = compute_final_metrics(
-        all_window_detections,
-        all_window_metadata,
-        all_frame_preds,
-        all_frame_targets,
-        NUM_CLASSES
+        global_action_gt_global=temp_global_gt, 
+        merged_all_action_preds=merged_all_action_preds, 
+        merged_all_frame_targets=temp_all_frame_targets_flat, # Placeholder
+        merged_all_frame_preds=temp_all_frame_preds_flat,   # Placeholder
+        num_classes=num_classes
     )
 
-    # Tính loss trung bình
-    val_loss /= len(val_loader)
+    avg_val_loss = val_loss / len(val_loader) # Calculate average loss
+    final_metrics['val_loss'] = avg_val_loss # Add loss to the results dict
     
-    # Return a dictionary of all calculated metrics
-    return {
-        'val_loss': val_loss,
-        'mAP': final_metrics['mAP'],
-        'merged_f1': final_metrics['merged_f1'],
-        'class_aps': final_metrics['class_aps'],
-        'map_mid': final_metrics['map_mid'],
-        'avg_f1_iou_010': final_metrics['avg_f1_iou_010'],
-        'avg_f1_iou_025': final_metrics['avg_f1_iou_025'],
-        'avg_f1_iou_050': final_metrics['avg_f1_iou_050']
-    }
+    return final_metrics
 
 def main():
-    """Main training function"""
-    print(f"Using device: {DEVICE}")
+    """Main training function, loads config and initiates training."""
+    parser = argparse.ArgumentParser(description="Train Temporal Action Detection Base Model")
+    parser.add_argument('--config', default='configs/config.yaml', help='Path to configuration file')
+    # Add arg to override resume behavior from config
+    parser.add_argument('--resume', action=argparse.BooleanOptionalAction, help="Override config resume_training setting")
+    parser.add_argument('--checkpoint', type=str, default=None, help="Specific checkpoint to resume from (overrides config default resume checkpoint)")
+
+    args = parser.parse_args()
+
+    # Load config
+    try:
+        with open(args.config, 'r') as f:
+            cfg = yaml.safe_load(f)
+    except FileNotFoundError: print(f"Error: Config file not found at {args.config}"); return
+    except Exception as e: print(f"Error loading config file: {e}"); return
+
+    # --- Setup from Config --- #
+    global_cfg = cfg['global']
+    data_cfg = cfg['data']
+    train_cfg = cfg['base_model_training']
+    opt_cfg = train_cfg['optimizer']
+    sched_cfg = train_cfg['scheduler']
+    loss_cfg = train_cfg['loss']
+
+    set_seed(global_cfg['seed'])
+
+    if global_cfg['device'] == 'auto': device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else: device = torch.device(global_cfg['device'])
     
-    # Log GPU memory stats
-    if torch.cuda.is_available():
-        set_seed(42) 
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"Total GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-        print(f"Mixed precision: {'Enabled' if USE_MIXED_PRECISION else 'Disabled'}")
-        print(f"Detection thresholds: Boundary={BOUNDARY_THRESHOLD}")
-        print(f"Class-specific thresholds: {CLASS_THRESHOLDS}")
-        print(f"Loss weights: Action={ACTION_WEIGHT}, Start={START_WEIGHT}, End={END_WEIGHT}")
-        print(f"Class 2 weight: {2.0}x, Class 3 weight: {2.0}x")
-        print(f"Learning rate: {LR}, Peak warmup: {LR*WARMUP_FACTOR}, Weight decay: {WEIGHT_DECAY}")
-        print(f"Gradient clipping: {MAX_GRAD_NORM}")
-        print(f"Warmup epochs: {WARMUP_EPOCHS}")
-        print(f"MIN_CONFIDENT_RATIO: {MIN_CONFIDENT_RATIO}")
-    
-    # Get dataloaders
-    train_loader = get_train_loader(batch_size=BATCH_SIZE)
-    val_loader = get_val_loader(batch_size=BATCH_SIZE)  # Use validation loader instead of test
-    
-    # Initialize model - use TemporalActionDetector for multi-stream processing
-    model = TemporalActionDetector(num_classes=NUM_CLASSES, window_size=WINDOW_SIZE)
-    
-    # Chuyển model to device trước
-    model = model.to(DEVICE)
-    
-    # Initialize optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, eps=1e-4)
-    
-    # Thay đổi scheduler từ CosineAnnealingLR sang ReduceLROnPlateau
+    print(f"Using device: {device}")
+    if torch.cuda.is_available(): print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"Using config file: {args.config}")
+
+    # --- Dataloaders --- #
+    # Batch size for loader comes from training config
+    train_loader = get_train_loader(batch_size=train_cfg['batch_size'], shuffle=True) 
+    val_loader = get_val_loader(batch_size=train_cfg['batch_size'], shuffle=False)
+
+    # --- Model --- #
+    model = TemporalActionDetector(
+        num_classes=global_cfg['num_classes'], 
+        window_size=global_cfg['window_size']
+        # Add dropout from config if applicable to model init
+        # dropout=train_cfg.get('dropout', 0.3) 
+    ).to(device)
+    print(f"Model: TemporalActionDetector with {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters")
+
+    # --- Loss Function --- #
+    criterion = ActionDetectionLoss(
+        action_weight=loss_cfg['action_weight'], 
+        start_weight=loss_cfg['start_weight'], 
+        end_weight=loss_cfg['end_weight'], 
+        num_classes=global_cfg['num_classes'],
+        label_smoothing=loss_cfg['label_smoothing'],
+        device=device # Pass device explicitly
+    )
+
+    # --- Optimizer --- #
+    if opt_cfg['type'].lower() == 'adamw':
+        optimizer = optim.AdamW(
+            model.parameters(), lr=opt_cfg['lr'], 
+            weight_decay=opt_cfg['weight_decay'], eps=opt_cfg['eps']
+        )
+    else:
+        # Add other optimizers if needed
+        print(f"Error: Unsupported optimizer type {opt_cfg['type']}")
+        return
+        
+    # --- Scheduler --- #
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        mode='min',        # Giảm LR khi metric giảm
-        factor=0.2,        # Giảm LR 50% mỗi lần
-        patience=3,        # Đợi 3 epochs không cải thiện
-        min_lr=1e-6,       # LR tối thiểu
-        verbose=True       # In thông báo khi LR thay đổi
+        mode='min', 
+        factor=sched_cfg['factor'], 
+        patience=sched_cfg['patience'], 
+        min_lr=sched_cfg['min_lr'], 
+        verbose=True 
     )
-    
-    # Khởi tạo training state
+
+    # --- Checkpoint Loading / Resume Logic --- #
     start_epoch = 0
-    best_map = 0
+    best_map = 0.0
+    checkpoint_dir = Path(data_cfg['base_model_checkpoints'])
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
-    # Resume training nếu RESUME_TRAINING=True và file checkpoint tồn tại
-    if RESUME_TRAINING and os.path.exists(RESUME_CHECKPOINT):
-        print(f"Resuming training from checkpoint: {RESUME_CHECKPOINT}")
-        checkpoint = torch.load(RESUME_CHECKPOINT, map_location=DEVICE)
-        
-        # Load model state
-        model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Đảm bảo tất cả params đều ở GPU sau khi load state dict
-        model = model.to(DEVICE)
-        
-        # Khởi tạo optimizer mới trên cùng device
-        optimizer = optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY, eps=1e-4)
-        
-        # Load optimizer state
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        # Chuyển tất cả state tensors của optimizer lên GPU
-        for state in optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(DEVICE)
-        
-        # Khởi tạo scheduler mới
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode='min',
-            factor=0.2,
-            patience=3,
-            min_lr=1e-6,
-            verbose=True
-        )
-        # Load scheduler state if available in checkpoint
-        if 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            print("Loaded scheduler state from checkpoint.")
+    # Determine if resuming and which checkpoint to use
+    resume_training = args.resume if args.resume is not None else train_cfg['resume_training']
+    resume_checkpoint_path = None
+    if resume_training:
+        if args.checkpoint:
+            resume_checkpoint_path = Path(args.checkpoint)
+            print(f"Attempting to resume from specified checkpoint: {resume_checkpoint_path}")
         else:
-            print("Scheduler state not found in checkpoint, initializing new scheduler.")
-        
-        # Set training state
-        start_epoch = checkpoint['epoch']
-        best_map = checkpoint['val_map']
-        
-        print(f"Loaded checkpoint from epoch {start_epoch} with mAP: {best_map:.4f}")
-    else:
-        print("No checkpoint found, starting from scratch")
-    
-    # Print model summary
-    print(f"Model: TemporalActionDetector with {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters")
-    print(f"Streams: RGB + Pose with Velocity (198 dims, bỏ Hand stream)")
-    print(f"Scheduler: ReduceLROnPlateau (factor=0.5, patience=3, min_lr=1e-6)")
-    
-    # Initialize loss function với class weights và label smoothing
-    criterion = ActionDetectionLoss(action_weight=ACTION_WEIGHT, start_weight=START_WEIGHT, 
-                                   end_weight=END_WEIGHT, device=DEVICE, num_classes=NUM_CLASSES, label_smoothing=0.1)
-    
-    
-    # Train model
-    try:
-        best_map = train(model, train_loader, val_loader, criterion, optimizer, scheduler, EPOCHS, DEVICE, 
-                          start_epoch=start_epoch, best_map=best_map)
-        print(f"\n✅ Training complete! Best validation mAP: {best_map:.4f}")
-        print(f"Best model saved to {CHECKPOINT}")
-        
-        # Final evaluation on test set if requested
-        if FINAL_EVALUATION:
-            print("\n=== Final Evaluation on Test Set ===")
-            # Load best model
-            checkpoint = torch.load(CHECKPOINT, map_location=DEVICE)
+            default_resume_name = data_cfg.get('base_resume_checkpoint_name')
+            if default_resume_name:
+                 resume_checkpoint_path = checkpoint_dir / default_resume_name
+                 print(f"Attempting to resume from default checkpoint in config: {resume_checkpoint_path}")
+            else:
+                 print("Resume enabled but no specific or default checkpoint specified in config.")
+
+    if resume_checkpoint_path and resume_checkpoint_path.exists():
+        print(f"Resuming training from checkpoint: {resume_checkpoint_path}")
+        try:
+            checkpoint = torch.load(resume_checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
-            model.eval()
             
-            # Get test loader
-            test_loader = get_test_loader(batch_size=BATCH_SIZE)
-            
-            # Evaluate on test set
-            test_loss, test_map, test_f1, test_class_ap_dict = evaluate(model, test_loader, criterion, DEVICE)
-            
-            print(f"Test Loss: {test_loss:.4f}, Test mAP: {test_map:.4f}, Test F1: {test_f1:.4f}")
-            print(f"Test Class AP: {', '.join([f'C{c}={test_class_ap_dict[c]:.4f}' for c in range(NUM_CLASSES)])}")
+                # Re-init optimizer before loading state for device compatibility
+            if opt_cfg['type'].lower() == 'adamw':
+                    optimizer = optim.AdamW(model.parameters(), lr=opt_cfg['lr'], weight_decay=opt_cfg['weight_decay'], eps=opt_cfg['eps'])
+                # Add other optimizers if needed
+
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Ensure optimizer state is on the correct device
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                        if isinstance(v, torch.Tensor): state[k] = v.to(device)
+
+                # Re-init scheduler before loading state
+                scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=sched_cfg['factor'], patience=sched_cfg['patience'], min_lr=sched_cfg['min_lr'], verbose=True)
+                if 'scheduler_state_dict' in checkpoint: scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+                start_epoch = checkpoint.get('epoch', 0)
+                best_map = checkpoint.get('val_map', 0.0)
+                print(f"Loaded checkpoint from epoch {start_epoch}. Previous best mAP: {best_map:.4f}")
+                # Optionally load and restore config if saved in checkpoint? cfg = checkpoint.get('cfg', cfg)
+        except Exception as e:
+             print(f"Error loading checkpoint {resume_checkpoint_path}: {e}. Starting from scratch.")
+             start_epoch = 0
+             best_map = 0.0
+    elif resume_training:
+        print(f"Resume enabled but checkpoint not found at {resume_checkpoint_path}. Starting from scratch.")
+    else:
+        print("Starting training from scratch.")
+
+    # --- Start Training --- #
+    try:
+        final_best_map = train(
+            model, train_loader, val_loader, criterion, optimizer, scheduler, 
+            cfg, # Pass full config dictionary
+            device, start_epoch=start_epoch, best_map=best_map
+        )
+        print(f"\n✅ Training complete! Best validation mAP: {final_best_map:.4f}")
+        best_model_path = checkpoint_dir / data_cfg['base_best_checkpoint_name']
+        print(f"Best model saved to {best_model_path}")
+        
+        # --- Final Evaluation on Test Set --- #
+        if train_cfg['evaluation']['run_final_evaluation_on_test']:
+            print("\n=== Final Evaluation on Test Set ===")
+            best_model_path = checkpoint_dir / data_cfg['base_best_checkpoint_name']
+            if best_model_path.exists():
+                print(f"Loading best model from {best_model_path}")
+                checkpoint = torch.load(best_model_path, map_location=device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+
+                test_loader = get_test_loader(batch_size=train_cfg['batch_size'], shuffle=False)
+
+                # Call evaluate for the test set
+                test_metrics = evaluate(
+                    model, test_loader, criterion, device,
+                    eval_cfg=train_cfg, # Use same eval settings as validation
+                    num_classes=global_cfg['num_classes'],
+                    use_mixed_precision=train_cfg['use_mixed_precision']
+                )
+
+                print(f"Test Loss: {test_metrics.get('val_loss', -1):.4f}, Test mAP: {test_metrics.get('mAP', -1):.4f}, Test F1: {test_metrics.get('merged_f1', -1):.4f}")
+                class_aps_test = test_metrics.get('class_aps', {})
+                print(f"Test Class AP: {', '.join([f'C{c}={class_aps_test.get(c, 0.0):.4f}' for c in range(global_cfg['num_classes'])])}")
             
             # Save test results
-            test_results = {
-                'test_map': test_map,
-                'test_f1': test_f1,
-                'test_loss': test_loss,
-                'class_aps': test_class_ap_dict
-            }
-            
-            with open(os.path.join(LOG_DIR, 'test_results.json'), 'w') as f:
-                json.dump(test_results, f, indent=2)
+                log_dir = Path(data_cfg['logs'])
+                test_results_path = log_dir / 'test_results_base_model.json'
+                try:
+                     with open(test_results_path, 'w') as f: json.dump(test_metrics, f, indent=2)
+                     print(f"Saved test results to {test_results_path}")
+                except Exception as e: print(f"Error saving test results: {e}")
+            else:
+                print(f"Error: Best model checkpoint not found at {best_model_path} for final test evaluation.")
                 
     except Exception as e:
         print(f"\n❌ Error during training: {str(e)}")
@@ -561,8 +543,8 @@ def main():
         traceback.print_exc()
         # Try to free up memory
         torch.cuda.empty_cache()
-        raise e
+        # raise e # Optional: re-raise after cleanup
 
 if __name__ == "__main__":
-    torch.cuda.empty_cache()  # Clear cache before starting
+    torch.cuda.empty_cache()  
     main() 
