@@ -272,54 +272,23 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
             all_window_metadata.extend(metadata) # Metadata per window
             
             # Frame-level accumulation (might be done inside compute_final_metrics too)
-            # from src.utils.helpers import process_for_evaluation # Needs import
-            # for i, (dets, meta) in enumerate(zip(batch_detections, metadata)):
-            #     preds, targets = process_for_evaluation(dets, meta['annotations'], action_masks[i].cpu(), frames.shape[2], num_classes)
-            #     all_frame_preds_flat.extend(preds)
-            #     all_frame_targets_flat.extend(targets)
+            from src.utils.helpers import process_for_evaluation
+            for i, (dets, meta) in enumerate(zip(batch_detections, metadata)):
+                preds, targets = process_for_evaluation(dets, meta['annotations'], action_masks[i].cpu(), frames.shape[2], num_classes)
+                all_frame_preds_flat.extend(preds)
+                all_frame_targets_flat.extend(targets)
 
-    # --- Calculate Final Metrics --- #
-    # Call the centralized function
-    # Note: compute_final_metrics needs adjustment to accept window-level data 
-    # and perform the merging/flattening internally OR this evaluate function 
-    # needs to do the preparation before calling it.
-    
-    # Let's assume evaluate prepares the final flattened lists as before for simplicity now.
-    # This requires re-implementing the GT/Pred processing loop here temporarily until
-    # compute_final_metrics is fully refactored to handle window data. 
-    
-    # --- TEMPORARY: Re-implement GT/Pred processing for compute_final_metrics input --- #
-    print("\nTemporary: Preparing data for compute_final_metrics...")
-    temp_global_gt, _, _ = calculate_global_gt(all_window_metadata, num_classes) 
-    
-    # Flatten predictions similar to how evaluate_pipeline does for RNN output
-    from src.utils.postprocessing import merge_cross_window_detections, resolve_cross_class_overlaps # Need these imports
-    merged_video_detections = merge_cross_window_detections(all_window_detections, all_window_metadata, iou_threshold=0.2, confidence_threshold=0.15)
-    merged_video_detections = resolve_cross_class_overlaps(merged_video_detections)
-    merged_all_action_preds = defaultdict(list)
-    for video_dets in merged_video_detections.values():
-        for det in video_dets:
-            merged_all_action_preds[det['action_id']].append({'segment': (det['start_frame'], det['end_frame']), 'score': det['confidence']})
-    
-    # Calculate flattened frame targets/preds (based on merged detections)
-    temp_all_frame_targets_flat = []
-    temp_all_frame_preds_flat = []
-    # (Need the loop similar to evaluate_pipeline to create frame-level lists based on merged_video_detections and temp_global_gt)
-    # This is complex and ideally lives within compute_final_metrics
-    # For now, pass empty lists for frame metrics as placeholder
-    print("Warning: Frame-level F1 calculation needs refactoring within compute_final_metrics or evaluate.")
-    # --- End Temporary Section --- # 
-    
+
     final_metrics = compute_final_metrics(
-        global_action_gt_global=temp_global_gt, 
-        merged_all_action_preds=merged_all_action_preds, 
-        merged_all_frame_targets=temp_all_frame_targets_flat, # Placeholder
-        merged_all_frame_preds=temp_all_frame_preds_flat,   # Placeholder
-        num_classes=num_classes
+        all_window_detections,
+        all_window_metadata,
+        all_frame_preds_flat,
+        all_frame_targets_flat,
+        num_classes
     )
 
-    avg_val_loss = val_loss / len(val_loader) # Calculate average loss
-    final_metrics['val_loss'] = avg_val_loss # Add loss to the results dict
+    avg_val_loss = val_loss / len(val_loader)
+    final_metrics['val_loss'] = avg_val_loss
     
     return final_metrics
 
@@ -327,13 +296,11 @@ def main():
     """Main training function, loads config and initiates training."""
     parser = argparse.ArgumentParser(description="Train Temporal Action Detection Base Model")
     parser.add_argument('--config', default='configs/config.yaml', help='Path to configuration file')
-    # Add arg to override resume behavior from config
     parser.add_argument('--resume', action=argparse.BooleanOptionalAction, help="Override config resume_training setting")
     parser.add_argument('--checkpoint', type=str, default=None, help="Specific checkpoint to resume from (overrides config default resume checkpoint)")
 
     args = parser.parse_args()
 
-    # Load config
     try:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
