@@ -1,15 +1,13 @@
 import torch
 
 def debug_detection_stats(batch_detections, batch_size, metadata):
-    """Print detection statistics for debugging"""
     total_dets = sum(len(dets) for dets in batch_detections)
     if total_dets == 0:
-        print("WARNING: No detections in batch!")
+        print("No detections in batch")
         return
     
     print(f"Detections in batch: {total_dets} (avg {total_dets/batch_size:.1f} per sample)")
     
-    # Count detections per class
     class_counts = {}
     for i, dets in enumerate(batch_detections):
         video_id = metadata[i]["video_id"] if i < len(metadata) else "unknown"
@@ -21,11 +19,9 @@ def debug_detection_stats(batch_detections, batch_size, metadata):
                 class_counts[action_id] = 0
             class_counts[action_id] += 1
     
-    # Print class statistics
     for action_id, count in sorted(class_counts.items()):
         print(f"  Class {action_id}: {count} detections")
     
-    # Print detection details for first few detections
     if total_dets > 0:
         print("\nDetection details (first 3):")
         count = 0
@@ -40,13 +36,10 @@ def debug_detection_stats(batch_detections, batch_size, metadata):
                 break
 
 def debug_raw_predictions(action_probs):
-    """Analyze raw prediction values before thresholding"""
-    # Check variance in predictions (helpful to detect potential collapse)
     action_variance = torch.var(action_probs).item()
     print(f"Action prediction variance: {action_variance:.6f}")
     
-    # Check per-class stats
-    for c in range(action_probs.shape[2]):  # For each class
+    for c in range(action_probs.shape[2]):
         class_probs = action_probs[:, :, c]
         print(f"Class {c}: min={class_probs.min().item():.4f}, max={class_probs.max().item():.4f}, mean={class_probs.mean().item():.4f}", end = " - ")
-    print("\n")
+    print("")
