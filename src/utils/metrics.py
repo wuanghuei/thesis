@@ -4,7 +4,6 @@ import numpy as np
 
 
 def calculate_f1_at_iou(gt_segments, pred_segments, iou_threshold):
-    """Calculate F1 score at a specific IoU threshold"""
     if not pred_segments:
         return 0.0, 0.0, 0.0
     
@@ -140,5 +139,4 @@ def calculate_mAP(all_action_gt, all_action_preds, num_classes, iou_thresholds=[
         
         aps.append(np.mean(class_aps))
     
-    # Calculate mAP
     return np.mean(aps) if aps else 0.0

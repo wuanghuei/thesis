@@ -9,17 +9,6 @@ from utils.helpers import gaussian_kernel
 
 class FullVideoDataset(Dataset):
     def __init__(self, frames_dir, anno_dir, pose_dir, num_classes, window_size, mode='train'):
-        """
-        Dataset for full video temporal localization
-        
-        Args:
-            frames_dir: Directory containing video frame .npz files
-            anno_dir: Directory containing annotation .json files
-            pose_dir: Directory containing pose data .npz files
-            num_classes: Number of action classes
-            window_size: Size of sliding window for processing
-            mode: 'train', 'val', or 'test'
-        """
         self.frames_dir = Path(frames_dir)
         self.anno_dir = Path(anno_dir)
         self.pose_dir = Path(pose_dir)
@@ -51,7 +40,6 @@ class FullVideoDataset(Dataset):
         print(f"[{mode}] Loaded {len(self.samples)} sliding windows from {len(video_ids)} videos")
         
     def _process_video(self, video_id):
-        """Process a single video and generate sliding window samples"""
         anno_path = self.anno_dir / f"{video_id}_annotations.json"
         with open(anno_path, 'r') as f:
             anno = json.load(f)
@@ -75,7 +63,6 @@ class FullVideoDataset(Dataset):
             self._add_window(video_id, start, end, annotations)
             
     def _add_window(self, video_id, start_idx, end_idx, all_annotations):
-        """Add a sliding window with corresponding annotations to samples"""
         window_annos = []
         
         for anno in all_annotations:
