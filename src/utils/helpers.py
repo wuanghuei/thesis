@@ -50,7 +50,7 @@ def calculate_temporal_iou(pred_segment, gt_segment):
     
     return intersection / union
 
-def process_for_evaluation(detections, gt_annotations, action_masks, window_size, num_classes):
+def process_for_evaluation(detections, gt_annotations, window_size, num_classes):
     """Process predictions and ground truth for evaluation metrics"""
     processed_preds = []
     processed_targets = []

@@ -17,22 +17,15 @@ except ImportError:
     print("Error: Could not import RNNPostProcessor from src/models/rnn_postprocessor.py")
     exit()
     
-NUM_CLASSES = 5
-BACKGROUND_LABEL = NUM_CLASSES
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-DEFAULT_RNN_CHECKPOINT = "best/rnn_checkpoints/best_rnn_model.pth"
-DEFAULT_INFERENCE_PKL = "best/test_inference_raw.pkl"
 
 def _run_rnn_on_all_videos(rnn_model, all_raw_preds, all_batch_meta, global_action_gt_by_video, device, num_classes, background_label):
-    """Runs the loaded RNN model on reconstructed features for all videos."""
     print("\nStep 4: Running RNN Post-Processing...")
     rnn_predictions_by_video = defaultdict(lambda: defaultdict(list))
     rnn_all_action_preds_flat = defaultdict(list)
     
     unique_video_ids_to_process = sorted(list(global_action_gt_by_video.keys()))
     if not unique_video_ids_to_process:
-         print("Warning: No unique video IDs found in metadata. Cannot run RNN post-processing.")
+         print("No unique video IDs found in metadata. Cannot run RNN post-processing.")
          return rnn_predictions_by_video, rnn_all_action_preds_flat
 
     for video_id in tqdm(unique_video_ids_to_process, desc="RNN Processing Videos"):
@@ -258,7 +251,7 @@ if __name__ == "__main__":
     parser.add_argument("--rnn_checkpoint_path", type=str, default=None, help="Override RNN checkpoint path from config")
     parser.add_argument("--inference_output_path", type=str, default=None, help="Override inference results pkl path from config")
     
-    # Visualization
+    #Visualization
     parser.add_argument("--visualize_video_id", type=str, default=None, help="Optional video ID to visualize (overrides config)")
     parser.add_argument("--frames_npz_path_template", type=str, default=None, help="Override frame NPZ path template from config")
     parser.add_argument("--output_video_path", type=str, default=None, help="Override visualization output video path from config")

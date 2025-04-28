@@ -6,33 +6,25 @@ import os
 import json
 from datetime import datetime
 from torch.cuda.amp import autocast, GradScaler
-import yaml # Import YAML
-from pathlib import Path # Import Path
-import argparse # Import argparse
+import yaml
+from pathlib import Path
+import argparse
 from collections import defaultdict
 
-# Import components from src
-# Ensure model import is correct
 from src.models.base_detector import TemporalActionDetector 
 from src.dataloader import get_train_loader, get_val_loader, get_test_loader
-from src.utils.helpers import set_seed, calculate_global_gt # Assuming process_for_evaluation moved or handled by compute_final_metrics
+from src.utils.helpers import set_seed, calculate_global_gt
 from src.utils.debugging import debug_detection_stats, debug_raw_predictions
 from src.losses import ActionDetectionLoss
-# Assuming post_process is now part of the model or called within compute_final_metrics
-# from src.utils.postprocessing import post_process # Remove if not called directly
 from src.evaluation import compute_final_metrics
+from src.utils.postprocessing import post_process
 
-
-# Removed the large block of hardcoded CONFIG constants
 
 def train(
     model, train_loader, val_loader, criterion, optimizer, scheduler, 
-    cfg, # Pass the relevant config section (e.g., base_model_training)
+    cfg,
     device, start_epoch=0, best_map=0
 ):
-    """Train the model using parameters from config."""
-    
-    # Extract necessary training parameters from cfg
     epochs = cfg['epochs']
     log_dir = Path(cfg['data']['logs'])
     checkpoint_dir = Path(cfg['data']['base_model_checkpoints'])
@@ -43,15 +35,10 @@ def train(
     warmup_epochs = cfg['warmup']['epochs']
     base_lr = cfg['optimizer']['lr']
     warmup_factor = cfg['warmup']['factor']
-    # Loss weights might be adjusted, get initial values
     initial_loss_weights = cfg['loss']
-    # Debug setting
     debug_detection_enabled = cfg['debugging']['debug_detection_enabled']
     
-    # --- Initialization ---
-    # Dynamic weight adjustment setup (optional, based on config?)
-    # adjust_weights = cfg.get('adjust_loss_weights_during_train', False) # Example: make it configurable
-    adjust_weights = True # Keep current behavior for now
+    adjust_weights = True
     if adjust_weights:
         initial_action_weight = initial_loss_weights['action_weight']
         initial_start_weight = initial_loss_weights['start_weight']
@@ -59,23 +46,19 @@ def train(
         
     start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file = log_dir / f"training_log_base_{start_time}.csv"
-    log_dir.mkdir(parents=True, exist_ok=True) # Ensure log dir exists
+    log_dir.mkdir(parents=True, exist_ok=True)
     
-    # Write header to log file
     with open(log_file, 'w') as f:
         f.write("epoch,train_loss,val_loss,val_map,val_f1,map_mid,f1_iou_010,f1_iou_025,f1_iou_050,class0_ap,class1_ap,class2_ap,class3_ap,class4_ap\n")
     
     losses = {'train': [], 'val': []}
     maps = []
-    # Get num_classes from the main config section if needed here, or pass it
     num_classes = cfg['global']['num_classes'] 
     class_aps = {c: [] for c in range(num_classes)}
     
     scaler = GradScaler(enabled=use_mixed_precision)
     
-    # --- Training Loop ---
     for epoch in range(start_epoch, epochs):
-        # Optional: Adjust loss weights dynamically
         if adjust_weights and epoch >= 30: 
             progress = min(1.0, (epoch - 30) / 20)  
             criterion.action_weight = initial_action_weight * (1 - 0.3 * progress)  
@@ -83,15 +66,13 @@ def train(
             criterion.end_weight = initial_end_weight * (1 + 0.5 * progress)  
             print(f"Epoch {epoch+1}: Adjusted weights - Action: {criterion.action_weight:.2f}, Start: {criterion.start_weight:.2f}, End: {criterion.end_weight:.2f}")
         
-        # Apply learning rate warmup
         if epoch < warmup_epochs:
-            warmup_start = base_lr / warmup_factor # Adjust start LR based on factor
+            warmup_start = base_lr / warmup_factor
             current_lr = warmup_start + (base_lr - warmup_start) * (epoch + 1) / warmup_epochs
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
             print(f"Warmup LR: {current_lr:.8f}")
         
-        # --- Train One Epoch ---
         model.train()
         train_loss = 0
         optimizer.zero_grad()
@@ -101,7 +82,6 @@ def train(
         
         for batch_idx, batch in enumerate(progress_bar):
             try:
-                # Assuming dataloader structure (adjust if hand_data was removed)
                 frames, pose_data, _, action_masks, start_masks, end_masks, _ = batch
             except ValueError:
                  print("Warning: Batch structure mismatch. Trying simplified unpack (frames, pose, masks..., meta). Check dataloader.")
@@ -128,8 +108,8 @@ def train(
             
             scaler.scale(loss).backward()
             
-            train_loss += loss.item() * gradient_accumulation_steps # Use accumulated loss
-            batch_count += 1 # Count batches processed before optimizer step
+            train_loss += loss.item() * gradient_accumulation_steps
+            batch_count += 1
             
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
                 scaler.unscale_(optimizer)
@@ -140,7 +120,7 @@ def train(
                 optimizer.zero_grad()
                 
                 progress_bar.set_postfix({
-                    'loss': f"{loss_dict['total'].item():.4f}", # Log non-accumulated loss
+                    'loss': f"{loss_dict['total'].item():.4f}",
                     'action': f"{loss_dict['action'].item():.4f}",
                     'start': f"{loss_dict['start'].item():.4f}",
                     'end': f"{loss_dict['end'].item():.4f}",
@@ -148,22 +128,20 @@ def train(
                 })
         
         if grad_norms: print(f"Gradient stats: min={min(grad_norms):.4f}, max={max(grad_norms):.4f}, mean={np.mean(grad_norms):.4f}")
-        train_loss /= batch_count # Average loss over batches where optimizer stepped
+        train_loss /= batch_count
         losses['train'].append(train_loss)
-        
-        # --- Validation --- #
-        # Pass relevant parts of config to evaluate
+    
         val_metrics = evaluate(
             model, val_loader, criterion, device, 
-            eval_cfg=cfg['base_model_training'], # Pass the training config section for thresholds etc.
+            eval_cfg=cfg['base_model_training'],
             num_classes=num_classes,
             use_mixed_precision=use_mixed_precision
         )
         val_loss = val_metrics['val_loss']
         val_map = val_metrics['mAP']
-        val_f1 = val_metrics['merged_f1'] # Assuming this key exists
+        val_f1 = val_metrics['merged_f1']
         class_ap_dict = val_metrics['class_aps']
-        map_mid = val_metrics.get('map_mid', 0.0) # Use .get for safety
+        map_mid = val_metrics.get('map_mid', 0.0)
         avg_f1_iou_010 = val_metrics.get('avg_f1_iou_010', 0.0)
         avg_f1_iou_025 = val_metrics.get('avg_f1_iou_025', 0.0)
         avg_f1_iou_050 = val_metrics.get('avg_f1_iou_050', 0.0)
@@ -172,13 +150,11 @@ def train(
         maps.append(val_map)
         for c in range(num_classes): class_aps[c].append(class_ap_dict.get(c, 0.0))
         
-        # Update LR scheduler
         if epoch >= warmup_epochs:
             scheduler.step(val_loss)
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Current LR: {current_lr:.8f}")
         
-        # --- Logging --- #
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val mAP: {val_map:.4f}, Val F1: {val_f1:.4f}")
         print(f"  Extra Metrics: mAP@mid={map_mid:.4f}, F1@0.1={avg_f1_iou_010:.4f}, F1@0.25={avg_f1_iou_025:.4f}, F1@0.5={avg_f1_iou_050:.4f}")
         print(f"  Class AP: {', '.join([f'C{c}={class_ap_dict.get(c, 0.0):.4f}' for c in range(num_classes)])}")
@@ -187,14 +163,12 @@ def train(
             for c in range(num_classes): f.write(f",{class_ap_dict.get(c, 0.0)}")
             f.write("\n")
         
-        # --- Save Checkpoint --- #
         is_best = val_map > best_map
         if is_best:
             best_map = val_map
             print(f"✅ Saving best model with mAP: {best_map:.4f} to {best_checkpoint_path}")
             
-        # Save best or potentially interim checkpoint
-        save_interim = (epoch + 1) % 5 == 0 # Example: save every 5 epochs
+        save_interim = (epoch + 1) % 5 == 0
         if is_best or save_interim:
             checkpoint_data = {
                 'epoch': epoch + 1,
@@ -204,49 +178,42 @@ def train(
                 'val_map': val_map,
                 'val_f1': val_f1,
                 'class_aps': class_ap_dict,
-                'cfg': cfg # Optionally save config used for this run
+                'cfg': cfg
             }
             current_checkpoint_path = best_checkpoint_path if is_best else checkpoint_dir / f"interim_model_epoch{epoch+1}.pth"
             try:
                  torch.save(checkpoint_data, current_checkpoint_path)
                  if not is_best and save_interim:
-                      print(f"💾 Saved interim checkpoint to {current_checkpoint_path}")
+                      print(f"Saved interim checkpoint to {current_checkpoint_path}")
             except Exception as e:
                  print(f"Error saving checkpoint to {current_checkpoint_path}: {e}")
-                 
-    # Optional: Plotting can be moved to a separate function/utility
-    # plot_training_curves(losses, maps, class_aps, log_dir, start_time) 
+
     
     return best_map
 
 def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mixed_precision):
-    """Evaluate the model using parameters from config."""
     model.eval()
     val_loss = 0.0
     
-    # Get postprocessing settings from config
     pp_cfg = eval_cfg['postprocessing']
     boundary_threshold = pp_cfg['boundary_threshold']
     class_thresholds = pp_cfg['class_thresholds']
     nms_threshold = pp_cfg['nms_threshold']
-    # min_segment_length = pp_cfg['min_segment_length'] # If needed by post_process
     
-    # Lists to store results for final metric calculation
     all_window_detections = []
     all_window_metadata = []
-    all_frame_preds_flat = [] # For frame-level F1
-    all_frame_targets_flat = [] # For frame-level F1
-    all_action_preds_flat = defaultdict(list) # For mAP
-    final_global_gt = defaultdict(list) # For mAP
-    
+    all_frame_preds_flat = [] #frame-level F1
+    all_frame_targets_flat = [] #frame-level F1
+    all_action_preds_flat = defaultdict(list)
+    final_global_gt = defaultdict(list)
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
             try:
                  frames, pose_data, _, action_masks, start_masks, end_masks, metadata = batch
             except ValueError:
-                 print("Warning: Batch structure mismatch in validation. Check dataloader.")
+                 print("Batch structure mismatch in validation. Check dataloader")
                  try: frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
-                 except ValueError: print("Fatal: Cannot determine batch structure. Exiting."); exit()
+                 except ValueError: print("Cannot determine batch structure"); exit()
             
             frames = frames.to(device)
             if pose_data is not None: pose_data = pose_data.to(device)
@@ -266,20 +233,17 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
             
             val_loss += loss.item()
             
-            # --- Post-processing --- # 
-            # Assuming the model itself has the post_process method now,
-            # or we call a utility function from src.utils.postprocessing
-            # For now, let's assume model.post_process exists as cleaned previously
+
             action_probs = torch.sigmoid(predictions['action_scores'])
             start_probs = torch.sigmoid(predictions['start_scores'])
             end_probs = torch.sigmoid(predictions['end_scores'])
         
-            # Option 1: If model has post_process method
             try:
-                 batch_detections = model.post_process(
-                     action_scores=action_probs, # Pass probs if method expects scores post-sigmoid
-                     start_scores=start_probs,
-                     end_scores=end_probs,
+                 batch_detections = post_process(
+                    model,
+                    action_scores=action_probs, # Pass probs if method expects scores post-sigmoid
+                    start_scores=start_probs,
+                    end_scores=end_probs,
                      action_threshold=class_thresholds, # Pass class-specific if method supports it
                      boundary_threshold=boundary_threshold,
                      nms_threshold=nms_threshold

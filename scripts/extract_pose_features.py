@@ -32,7 +32,7 @@ def process_video(video_id, frames_dir, pose_dir, pose_config):
         model_complexity=pose_config['model_complexity'],
         min_detection_confidence=pose_config['min_detection_confidence']) as pose_detector:
         
-        pose_features = np.zeros((num_frames, 99))  # 33 landmarks × 3 coordinates
+        pose_features = np.zeros((num_frames, 99))  #33 landmarks × 3 coordinates
         
         for i in tqdm(range(num_frames), desc=f"Processing {video_id}"):
             frame = frames[i]

@@ -10,15 +10,13 @@ from tqdm import tqdm
 from src.utils.helpers import find_nearest_subsampled_idx
 
 def prepare_full_video(video_path, label_path, output_dir_split, frame_size, subsample_factor):
-    """Process full video and save with temporal action annotations."""
-
     try:
         tlabs = loadmat(label_path)["tlabs"].ravel()
     except FileNotFoundError:
-        print(f"  Error: Label file not found: {label_path}")
+        print(f"Label file not found: {label_path}")
         return 0, 0, False
     except Exception as e:
-        print(f"  Error loading label file {label_path}: {e}")
+        print(f"Error loading label file {label_path}: {e}")
         return 0, 0, False
         
     video_id = Path(video_path).stem.replace("_crop", "")
@@ -30,7 +28,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        print(f"  Error: Cannot open video file: {video_path}")
+        print(f"Cannot open video file: {video_path}")
         return 0, 0, False
         
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -57,7 +55,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
     cap.release()
     
     if not frames:
-         print(f" Error: No frames extracted for video {video_id}. Skipping.")
+         print(f"No frames extracted for video {video_id}. Skip")
          return 0, 0, False
 
     try:
@@ -88,7 +86,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
                  end_frame = int(end)
 
                  if not frame_indices:
-                     print(f"  Warning: frame_indices empty for {video_id}. Cannot map segments.")
+                     print(f"frame_indices empty for {video_id}. Cannot map segments")
                      break
                      
                  sub_start = find_nearest_subsampled_idx(start_frame, frame_indices)
@@ -110,7 +108,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
             if not frame_indices: break
 
     except Exception as e:
-         print(f" Error processing segments for {video_id}: {e}")
+         print(f"Error processing segments for {video_id}: {e}")
 
     annotation_data = {
         "video_id": video_id,
@@ -128,20 +126,19 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
         with open(annotation_path, "w") as f:
             json.dump(annotation_data, f, indent=2)
     except Exception as e:
-        print(f" Error saving annotation JSON for {video_id}: {e}")
+        print(f"Error saving annotation JSON for {video_id}: {e}")
         return len(frames), len(action_annotations), False
 
     return len(frames), len(action_annotations), True
 
 def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size, subsample_factor):
-    """Process all videos for a specific split."""
-    print(f"\nProcessing {split_name} split...")
-    print(f"  Video dir: {video_dir}")
-    print(f"  Label dir: {label_dir}")
-    print(f"  Output dir: {output_dir_split}")
+    print(f"\nProcessing {split_name} split")
+    print(f"Video dir: {video_dir}")
+    print(f"Label dir: {label_dir}")
+    print(f"Output dir: {output_dir_split}")
     
     if not video_dir.exists() or not label_dir.exists():
-        print(f"Warning: Input directories for {split_name} not found. Skipping split.")
+        print(f"Input directories for {split_name} not found. Skipping split")
         return 0, 0, 0, 0
 
     output_dir_split.mkdir(parents=True, exist_ok=True)
@@ -155,7 +152,7 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
     label_files = sorted(list(label_dir.glob("*.mat")))
     
     if not label_files:
-        print(f"Warning: No *.mat label files found in {label_dir}. Skipping split.")
+        print(f"No .mat files found in {label_dir}. Skip")
         return 0, 0, 0, 0
         
     for label_path in tqdm(label_files, desc=f"Processing {split_name}"):
@@ -168,7 +165,7 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
         video_path = video_dir / video_file
 
         if not video_path.exists():
-            print(f"Warning: Missing video file {video_file} for label {mat_file}. Skipping.")
+            print(f"Missing video file {video_file} for label {mat_file}. Skip")
             error_count += 1
             continue
         
@@ -185,9 +182,9 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
         else:
              error_count += 1
              
-    print(f"{split_name} split processing complete.")
-    print(f"  Processed videos: {processed_videos}/{total_videos}")
-    print(f"  Errors encountered: {error_count}")
+    print(f"{split_name} split processing complete")
+    print(f"Processed videos: {processed_videos}/{total_videos}")
+    print(f"Errors encountered: {error_count}")
     
     dataset_stats = {
         "split": split_name,
@@ -211,7 +208,6 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
     return processed_videos, total_frames, total_actions, error_count
 
 def main():
-    """Load config and process selected dataset splits."""
     parser = argparse.ArgumentParser(description="Preprocess MERL Shopping dataset videos.")
     parser.add_argument('--config', default='configs/config.yaml', help='Path to configuration file')
     parser.add_argument(
@@ -227,7 +223,7 @@ def main():
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
     except FileNotFoundError:
-        print(f"Error: Config file not found at {args.config}")
+        print(f"Config file not found at {args.config}")
         return
     except Exception as e:
         print(f"Error loading config file: {e}")
@@ -272,7 +268,7 @@ def main():
         grand_total_actions += actions
         grand_total_errors += errors
 
-    print("\n--- Overall Preprocessing Summary ---")
+    print("\nOverall Preprocessing Summary")
     print(f"Total videos processed across all selected splits: {grand_total_videos}")
     print(f"Total frames generated: {grand_total_frames}")
     print(f"Total action segments found: {grand_total_actions}")
