@@ -11,7 +11,6 @@ from src.utils.feature_extraction import extract_pose_features
 mp_pose = mp.solutions.pose
 
 def process_video(video_id, frames_dir, pose_dir, pose_config):
-    """Process a single video to extract pose features using config."""
     npz_path = Path(frames_dir) / f"{video_id}_frames.npz"
     
     if not npz_path.exists():
@@ -22,7 +21,7 @@ def process_video(video_id, frames_dir, pose_dir, pose_config):
         frames_data = np.load(npz_path)
         frames = frames_data['frames']
     except Exception as e:
-        print(f"Error loading frames from {npz_path}: {e}")
+        print(f"loading frames from {npz_path}: {e}")
         return False
         
     num_frames = frames.shape[0]
@@ -44,25 +43,24 @@ def process_video(video_id, frames_dir, pose_dir, pose_config):
         pose_output_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(pose_output_path, pose=pose_features)
     except Exception as e:
-        print(f"Error saving pose features to {pose_output_path}: {e}")
+        print(f"saving pose features to {pose_output_path}: {e}")
         return False
 
     return True
 
 def process_dataset(split_name, frames_dir, pose_dir, pose_config):
-    """Process all videos in a dataset split using config."""
     print(f"Processing {split_name} data...")
     print(f"  Frames dir: {frames_dir}")
     print(f"  Pose output dir: {pose_dir}")
     
     if not Path(frames_dir).exists():
-        print(f"Warning: Frames directory not found: {frames_dir}. Skipping split.")
+        print(f"Frames directory not found: {frames_dir} Skipping split")
         return 0, 0
         
     frame_files = glob.glob(str(Path(frames_dir) / "*_frames.npz"))
     
     if not frame_files:
-        print(f"Warning: No *_frames.npz files found in {frames_dir}. Skipping split.")
+        print(f"No *_frames.npz files found in {frames_dir} Skipping split")
         return 0, 0
         
     success_count = 0
@@ -88,7 +86,7 @@ def process_dataset(split_name, frames_dir, pose_dir, pose_config):
             else:
                 error_count += 1
         except Exception as e:
-            print(f"Error processing {video_id}: {str(e)}")
+            print(f"processing {video_id}: {str(e)}")
             error_count += 1
             
     print(f"{split_name} data: {success_count} processed ({skipped_count} skipped), {error_count} errors")
@@ -110,10 +108,10 @@ def main():
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
     except FileNotFoundError:
-        print(f"Error: Config file not found at {args.config}")
+        print(f"Config file not found at {args.config}")
         return
     except Exception as e:
-        print(f"Error loading config file: {e}")
+        print(f"loading config file: {e}")
         return
         
     data_cfg = cfg['data']
@@ -141,7 +139,7 @@ def main():
         total_success += success
         total_errors += errors
     
-    print(f"\nFeature extraction complete! Total processed: {total_success}, Total errors: {total_errors}")
+    print(f"Feature extraction complete Total processed: {total_success}, Total errors: {total_errors}")
 
 if __name__ == "__main__":
     main() 

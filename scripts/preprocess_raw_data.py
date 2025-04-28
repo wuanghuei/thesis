@@ -16,7 +16,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
         print(f"Label file not found: {label_path}")
         return 0, 0, False
     except Exception as e:
-        print(f"Error loading label file {label_path}: {e}")
+        print(f"loading label file {label_path}: {e}")
         return 0, 0, False
         
     video_id = Path(video_path).stem.replace("_crop", "")
@@ -48,27 +48,27 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
                  frames.append(resized_frame)
                  frame_indices.append(int(idx))
             except Exception as e:
-                 print(f" Error resizing frame {idx} for video {video_id}: {e}")
+                 print(f" resizing frame {idx} for video {video_id}: {e}")
                  pass 
 
         idx += 1
     cap.release()
     
     if not frames:
-         print(f"No frames extracted for video {video_id}. Skip")
+         print(f"No frames extracted for video {video_id} Skip")
          return 0, 0, False
 
     try:
         video_array = np.stack(frames)
     except ValueError as e:
-         print(f" Error stacking frames for {video_id} (likely inconsistent shapes): {e}")
+         print(f" stacking frames for {video_id} (likely inconsistent shapes): {e}")
          return 0, 0, False
 
     npz_path = video_folder / f"{video_id}_frames.npz"
     try:
         np.savez_compressed(npz_path, frames=video_array)
     except Exception as e:
-        print(f" Error saving frames NPZ for {video_id}: {e}")
+        print(f" saving frames NPZ for {video_id}: {e}")
         return 0, 0, False
 
     action_annotations = []
@@ -86,7 +86,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
                  end_frame = int(end)
 
                  if not frame_indices:
-                     print(f"frame_indices empty for {video_id}. Cannot map segments")
+                     print(f"frame_indices empty for {video_id} Cannot map segments")
                      break
                      
                  sub_start = find_nearest_subsampled_idx(start_frame, frame_indices)
@@ -108,7 +108,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
             if not frame_indices: break
 
     except Exception as e:
-         print(f"Error processing segments for {video_id}: {e}")
+         print(f"processing segments for {video_id}: {e}")
 
     annotation_data = {
         "video_id": video_id,
@@ -126,7 +126,7 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
         with open(annotation_path, "w") as f:
             json.dump(annotation_data, f, indent=2)
     except Exception as e:
-        print(f"Error saving annotation JSON for {video_id}: {e}")
+        print(f"saving annotation JSON for {video_id}: {e}")
         return len(frames), len(action_annotations), False
 
     return len(frames), len(action_annotations), True
@@ -138,7 +138,7 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
     print(f"Output dir: {output_dir_split}")
     
     if not video_dir.exists() or not label_dir.exists():
-        print(f"Input directories for {split_name} not found. Skipping split")
+        print(f"Input directories for {split_name} not found Skipping split")
         return 0, 0, 0, 0
 
     output_dir_split.mkdir(parents=True, exist_ok=True)
@@ -152,7 +152,7 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
     label_files = sorted(list(label_dir.glob("*.mat")))
     
     if not label_files:
-        print(f"No .mat files found in {label_dir}. Skip")
+        print(f"No mat files found in {label_dir} Skip")
         return 0, 0, 0, 0
         
     for label_path in tqdm(label_files, desc=f"Processing {split_name}"):
@@ -165,7 +165,7 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
         video_path = video_dir / video_file
 
         if not video_path.exists():
-            print(f"Missing video file {video_file} for label {mat_file}. Skip")
+            print(f"Missing video file {video_file} for label {mat_file} Skip")
             error_count += 1
             continue
         
@@ -203,7 +203,7 @@ def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size
             json.dump(dataset_stats, f, indent=2)
         print(f"Saved dataset stats for {split_name} to {stats_path}")
     except Exception as e:
-        print(f"Error saving dataset stats for {split_name}: {e}")
+        print(f"saving dataset stats for {split_name}: {e}")
         
     return processed_videos, total_frames, total_actions, error_count
 
@@ -226,7 +226,7 @@ def main():
         print(f"Config file not found at {args.config}")
         return
     except Exception as e:
-        print(f"Error loading config file: {e}")
+        print(f"loading config file: {e}")
         return
 
     data_cfg = cfg['data']
@@ -247,7 +247,7 @@ def main():
         splits_to_process.append("test")
         
     if not splits_to_process:
-        print("No valid split selected.")
+        print("No valid split selected")
         return
         
     grand_total_videos = 0

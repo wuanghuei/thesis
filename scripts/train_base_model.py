@@ -11,9 +11,10 @@ from pathlib import Path
 import argparse
 from collections import defaultdict
 
+
 from src.models.base_detector import TemporalActionDetector 
 from src.dataloader import get_train_loader, get_val_loader, get_test_loader
-from src.utils.helpers import set_seed, calculate_global_gt
+from src.utils.helpers import set_seed, process_for_evaluation
 from src.utils.debugging import debug_detection_stats, debug_raw_predictions
 from src.losses import ActionDetectionLoss
 from src.evaluation import compute_final_metrics
@@ -84,9 +85,9 @@ def train(
             try:
                 frames, pose_data, _, action_masks, start_masks, end_masks, _ = batch
             except ValueError:
-                 print("Warning: Batch structure mismatch. Trying simplified unpack (frames, pose, masks..., meta). Check dataloader.")
+                 print("Batch structure mismatch Trying simplified unpack (frames, pose, masks..., meta) Check dataloader")
                  try: frames, pose_data, action_masks, start_masks, end_masks, _ = batch
-                 except ValueError: print("Fatal: Cannot determine batch structure. Exiting."); exit()
+                 except ValueError: print("Cannot determine batch structure, exiting"); exit()
             
             frames = frames.to(device)
             if pose_data is not None: pose_data = pose_data.to(device)
@@ -166,7 +167,7 @@ def train(
         is_best = val_map > best_map
         if is_best:
             best_map = val_map
-            print(f"✅ Saving best model with mAP: {best_map:.4f} to {best_checkpoint_path}")
+            print(f"Saving best model with mAP: {best_map:.4f} to {best_checkpoint_path}")
             
         save_interim = (epoch + 1) % 5 == 0
         if is_best or save_interim:
@@ -202,18 +203,16 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
     
     all_window_detections = []
     all_window_metadata = []
-    all_frame_preds_flat = [] #frame-level F1
-    all_frame_targets_flat = [] #frame-level F1
-    all_action_preds_flat = defaultdict(list)
-    final_global_gt = defaultdict(list)
+    all_frame_preds_flat = []
+    all_frame_targets_flat = []
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
             try:
                  frames, pose_data, _, action_masks, start_masks, end_masks, metadata = batch
             except ValueError:
-                 print("Batch structure mismatch in validation. Check dataloader")
+                 print("Batch structure mismatch in validation Check dataloader")
                  try: frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
-                 except ValueError: print("Cannot determine batch structure"); exit()
+                 except ValueError: print("Cannot determine batch structure, exiting"); exit()
             
             frames = frames.to(device)
             if pose_data is not None: pose_data = pose_data.to(device)
@@ -238,41 +237,24 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
             start_probs = torch.sigmoid(predictions['start_scores'])
             end_probs = torch.sigmoid(predictions['end_scores'])
         
-            try:
-                 batch_detections = post_process(
-                    model,
-                    action_scores=action_probs, # Pass probs if method expects scores post-sigmoid
-                    start_scores=start_probs,
-                    end_scores=end_probs,
-                     action_threshold=class_thresholds, # Pass class-specific if method supports it
-                     boundary_threshold=boundary_threshold,
-                     nms_threshold=nms_threshold
-                     # Pass other args like min_segment_length if needed
-                 )
-            except AttributeError:
-                 print("Error: model.post_process not found. Ensure post-processing logic is correctly placed.")
-                 # Option 2: Call a utility function (needs import)
-                 # from src.utils.postprocessing import post_process # Example import
-                 batch_detections = [[] for _ in range(frames.shape[0])] # Placeholder
-            except TypeError as e:
-                 print(f"Error calling model.post_process (likely argument mismatch): {e}")
-                 batch_detections = [[] for _ in range(frames.shape[0])] # Placeholder
+
+            batch_detections = post_process(
+                action_probs=action_probs,
+                start_probs=start_probs,
+                end_probs=end_probs,
+                class_thresholds=class_thresholds,
+                boundary_threshold=boundary_threshold,
+                nms_threshold=nms_threshold
+                )
+
                  
             if eval_cfg['debugging']['debug_detection_enabled']:
                 debug_detection_stats(batch_detections, frames.shape[0], metadata)
             
-            # --- Accumulate results for metric calculation --- #
-            # This part needs to be aligned with what compute_final_metrics expects
-            # It involves calculating global GT and flattening predictions/targets
-            # This logic might be complex and could be part of compute_final_metrics itself
             
-            # Placeholder: Assume compute_final_metrics handles aggregation internally for now
-            # We need to pass the raw batch-level info it needs
-            all_window_detections.extend(batch_detections) # Detections per window
-            all_window_metadata.extend(metadata) # Metadata per window
+            all_window_detections.extend(batch_detections)
+            all_window_metadata.extend(metadata)
             
-            # Frame-level accumulation (might be done inside compute_final_metrics too)
-            from src.utils.helpers import process_for_evaluation
             for i, (dets, meta) in enumerate(zip(batch_detections, metadata)):
                 preds, targets = process_for_evaluation(dets, meta['annotations'], action_masks[i].cpu(), frames.shape[2], num_classes)
                 all_frame_preds_flat.extend(preds)
@@ -304,10 +286,9 @@ def main():
     try:
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
-    except FileNotFoundError: print(f"Error: Config file not found at {args.config}"); return
-    except Exception as e: print(f"Error loading config file: {e}"); return
+    except FileNotFoundError: print(f"Config file not found at {args.config}, returning"); return
+    except Exception as e: print(f"loading config file: {e}, returning"); return
 
-    # --- Setup from Config --- #
     global_cfg = cfg['global']
     data_cfg = cfg['data']
     train_cfg = cfg['base_model_training']
@@ -317,49 +298,39 @@ def main():
 
     set_seed(global_cfg['seed'])
 
-    if global_cfg['device'] == 'auto': device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else: device = torch.device(global_cfg['device'])
+    device = torch.device(global_cfg['device'])
     
     print(f"Using device: {device}")
     if torch.cuda.is_available(): print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Using config file: {args.config}")
 
-    # --- Dataloaders --- #
-    # Batch size for loader comes from training config
     train_loader = get_train_loader(batch_size=train_cfg['batch_size'], shuffle=True) 
     val_loader = get_val_loader(batch_size=train_cfg['batch_size'], shuffle=False)
 
-    # --- Model --- #
     model = TemporalActionDetector(
         num_classes=global_cfg['num_classes'], 
         window_size=global_cfg['window_size']
-        # Add dropout from config if applicable to model init
-        # dropout=train_cfg.get('dropout', 0.3) 
     ).to(device)
     print(f"Model: TemporalActionDetector with {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters")
 
-    # --- Loss Function --- #
     criterion = ActionDetectionLoss(
         action_weight=loss_cfg['action_weight'], 
         start_weight=loss_cfg['start_weight'], 
         end_weight=loss_cfg['end_weight'], 
         num_classes=global_cfg['num_classes'],
         label_smoothing=loss_cfg['label_smoothing'],
-        device=device # Pass device explicitly
+        device=device
     )
 
-    # --- Optimizer --- #
     if opt_cfg['type'].lower() == 'adamw':
         optimizer = optim.AdamW(
             model.parameters(), lr=opt_cfg['lr'], 
             weight_decay=opt_cfg['weight_decay'], eps=opt_cfg['eps']
         )
     else:
-        # Add other optimizers if needed
-        print(f"Error: Unsupported optimizer type {opt_cfg['type']}")
+        print(f"Unsupported optimizer type {opt_cfg['type']}")
         return
         
-    # --- Scheduler --- #
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min', 
@@ -369,13 +340,11 @@ def main():
         verbose=True 
     )
 
-    # --- Checkpoint Loading / Resume Logic --- #
     start_epoch = 0
     best_map = 0.0
     checkpoint_dir = Path(data_cfg['base_model_checkpoints'])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
-    # Determine if resuming and which checkpoint to use
     resume_training = args.resume if args.resume is not None else train_cfg['resume_training']
     resume_checkpoint_path = None
     if resume_training:
@@ -388,7 +357,7 @@ def main():
                  resume_checkpoint_path = checkpoint_dir / default_resume_name
                  print(f"Attempting to resume from default checkpoint in config: {resume_checkpoint_path}")
             else:
-                 print("Resume enabled but no specific or default checkpoint specified in config.")
+                 print("Resume enabled but no specific or default checkpoint specified in config")
 
     if resume_checkpoint_path and resume_checkpoint_path.exists():
         print(f"Resuming training from checkpoint: {resume_checkpoint_path}")
@@ -396,46 +365,39 @@ def main():
             checkpoint = torch.load(resume_checkpoint_path, map_location=device)
             model.load_state_dict(checkpoint['model_state_dict'])
             
-                # Re-init optimizer before loading state for device compatibility
             if opt_cfg['type'].lower() == 'adamw':
                     optimizer = optim.AdamW(model.parameters(), lr=opt_cfg['lr'], weight_decay=opt_cfg['weight_decay'], eps=opt_cfg['eps'])
-                # Add other optimizers if needed
 
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                # Ensure optimizer state is on the correct device
             for state in optimizer.state.values():
                 for k, v in state.items():
                         if isinstance(v, torch.Tensor): state[k] = v.to(device)
 
-                # Re-init scheduler before loading state
                 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=sched_cfg['factor'], patience=sched_cfg['patience'], min_lr=sched_cfg['min_lr'], verbose=True)
                 if 'scheduler_state_dict' in checkpoint: scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
 
                 start_epoch = checkpoint.get('epoch', 0)
                 best_map = checkpoint.get('val_map', 0.0)
-                print(f"Loaded checkpoint from epoch {start_epoch}. Previous best mAP: {best_map:.4f}")
-                # Optionally load and restore config if saved in checkpoint? cfg = checkpoint.get('cfg', cfg)
+                print(f"Loaded checkpoint from epoch {start_epoch} Previous best mAP: {best_map:.4f}")
         except Exception as e:
-             print(f"Error loading checkpoint {resume_checkpoint_path}: {e}. Starting from scratch.")
+             print(f"loading checkpoint {resume_checkpoint_path}: {e}, Starting from scratch")
              start_epoch = 0
              best_map = 0.0
     elif resume_training:
-        print(f"Resume enabled but checkpoint not found at {resume_checkpoint_path}. Starting from scratch.")
+        print(f"Resume enabled but checkpoint not found at {resume_checkpoint_path}, Starting from scratch")
     else:
-        print("Starting training from scratch.")
+        print("Starting training from scratch")
 
-    # --- Start Training --- #
     try:
         final_best_map = train(
             model, train_loader, val_loader, criterion, optimizer, scheduler, 
-            cfg, # Pass full config dictionary
+            cfg, 
             device, start_epoch=start_epoch, best_map=best_map
         )
-        print(f"\n✅ Training complete! Best validation mAP: {final_best_map:.4f}")
+        print(f"Training complete Best validation mAP: {final_best_map:.4f}")
         best_model_path = checkpoint_dir / data_cfg['base_best_checkpoint_name']
         print(f"Best model saved to {best_model_path}")
         
-        # --- Final Evaluation on Test Set --- #
         if train_cfg['evaluation']['run_final_evaluation_on_test']:
             print("\n=== Final Evaluation on Test Set ===")
             best_model_path = checkpoint_dir / data_cfg['base_best_checkpoint_name']
@@ -446,10 +408,9 @@ def main():
 
                 test_loader = get_test_loader(batch_size=train_cfg['batch_size'], shuffle=False)
 
-                # Call evaluate for the test set
                 test_metrics = evaluate(
                     model, test_loader, criterion, device,
-                    eval_cfg=train_cfg, # Use same eval settings as validation
+                    eval_cfg=train_cfg, 
                     num_classes=global_cfg['num_classes'],
                     use_mixed_precision=train_cfg['use_mixed_precision']
                 )
@@ -458,23 +419,20 @@ def main():
                 class_aps_test = test_metrics.get('class_aps', {})
                 print(f"Test Class AP: {', '.join([f'C{c}={class_aps_test.get(c, 0.0):.4f}' for c in range(global_cfg['num_classes'])])}")
             
-            # Save test results
                 log_dir = Path(data_cfg['logs'])
                 test_results_path = log_dir / 'test_results_base_model.json'
                 try:
                      with open(test_results_path, 'w') as f: json.dump(test_metrics, f, indent=2)
                      print(f"Saved test results to {test_results_path}")
-                except Exception as e: print(f"Error saving test results: {e}")
+                except Exception as e: print(f"saving test results: {e}")
             else:
-                print(f"Error: Best model checkpoint not found at {best_model_path} for final test evaluation.")
+                print(f"Best model checkpoint not found at {best_model_path} for final test evaluation")
                 
     except Exception as e:
-        print(f"\n❌ Error during training: {str(e)}")
+        print(f"Error during training: {str(e)}")
         import traceback
         traceback.print_exc()
-        # Try to free up memory
         torch.cuda.empty_cache()
-        # raise e # Optional: re-raise after cleanup
 
 if __name__ == "__main__":
     torch.cuda.empty_cache()  

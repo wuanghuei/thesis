@@ -16,12 +16,12 @@ from src.utils.helpers import process_predictions_for_rnn
 try:
     from src.models.base_detector import TemporalActionDetector
 except ImportError:
-    print("Error: Could not import TemporalActionDetector from src.models.model_fixed. Make sure the file exists.")
+    print("Could not import TemporalActionDetector from src models model_fixed Make sure the file exists")
     exit()
 try:
     from src.dataloader import get_train_loader, get_val_loader, get_test_loader
 except ImportError:
-    print("Error: Could not import get_train_loader/get_val_loader/get_test_loader from src.dataloader.")
+    print("Could not import get_train_loader/get_val_loader/get_test_loader from src dataloader")
     exit()
 try:
     from src.losses import ActionDetectionLoss
@@ -40,9 +40,9 @@ def run_inference(model, data_loader, device, use_mixed_precision):
             try:
                 frames, pose_data, _, _, _, _, metadata = batch
             except ValueError:
-                 print("Batch structure mismatch. Trying simplified unpack (frames, pose, meta). Check dataloader.")
+                 print("Batch structure mismatch Trying simplified unpack (frames, pose, meta) Check dataloader")
                  try: frames, pose_data, metadata = batch
-                 except ValueError: print("Cannot determine batch structure. Exiting."); exit()
+                 except ValueError: print("Cannot determine batch structure Exiting"); exit()
 
             frames = frames.to(device)
             if pose_data is not None: pose_data = pose_data.to(device)
@@ -107,43 +107,43 @@ def main(cfg, args):
             model.load_state_dict(state_dict)
             print(f"Successfully loaded model weights from epoch {checkpoint.get('epoch', 'N/A')}")
         except Exception as e:
-            print(f"Error loading checkpoint: {e}. Ensure valid path and compatible model.")
+            print(f"loading checkpoint: {e} Ensure valid path and compatible model")
             exit()
     else:
-        print(f"Error: Checkpoint file not found at {checkpoint_path}")
+        print(f"Checkpoint file not found at {checkpoint_path}")
         exit()
 
-    print("\nPreparing Training Set Inference")
+    print("Preparing Training Set Inference")
     train_loader = get_train_loader(batch_size=dl_cfg['train_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
     train_raw_preds, train_batch_meta = run_inference(model, train_loader, device, use_mixed_precision)
     print(f"\nSaving training inference results to: {train_pkl_path}")
     try:
         with open(train_pkl_path, 'wb') as f:
             pickle.dump({'all_raw_preds': train_raw_preds, 'all_batch_meta': train_batch_meta}, f)
-        print("Successfully saved training inference results.")
-    except Exception as e: print(f"Error saving training inference results: {e}")
+        print("Successfully saved training inference results")
+    except Exception as e: print(f"saving training inference results: {e}")
 
-    print("\nPreparing Validation Set Inference")
+    print("Preparing Validation Set Inference")
     val_loader = get_val_loader(batch_size=dl_cfg['val_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
     val_raw_preds, val_batch_meta = run_inference(model, val_loader, device, use_mixed_precision)
     print(f"\nSaving validation inference results to: {val_pkl_path}")
     try:
         with open(val_pkl_path, 'wb') as f:
             pickle.dump({'all_raw_preds': val_raw_preds, 'all_batch_meta': val_batch_meta}, f)
-        print("Successfully saved validation inference results.")
-    except Exception as e: print(f"Error saving validation inference results: {e}")
+        print("Successfully saved validation inference results")
+    except Exception as e: print(f"saving validation inference results: {e}")
 
-    print("\nPreparing Test Set Inference")
+    print("Preparing Test Set Inference")
     test_loader = get_test_loader(batch_size=dl_cfg['test_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
     test_raw_preds, test_batch_meta = run_inference(model, test_loader, device, use_mixed_precision)
     print(f"\nSaving test inference results to: {test_pkl_path}")
     try:
         with open(test_pkl_path, 'wb') as f:
             pickle.dump({'all_raw_preds': test_raw_preds, 'all_batch_meta': test_batch_meta}, f)
-        print("Successfully saved test inference results.")
-    except Exception as e: print(f"Error saving test inference results: {e}")
+        print("Successfully saved test inference results")
+    except Exception as e: print(f"saving test inference results: {e}")
 
-    print("\nProcessing raw data into RNN input format")
+    print("Processing raw data into RNN input format")
 
     print("Processing Training Data for RNN")
     process_predictions_for_rnn(
@@ -189,10 +189,10 @@ if __name__ == "__main__":
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
     except FileNotFoundError:
-        print(f"Error: Config file not found at {args.config}")
+        print(f"Config file not found at {args.config}")
         exit()
     except Exception as e:
-        print(f"Error loading config file: {e}")
+        print(f"loading config file: {e}")
         exit()
         
     main(cfg, args) 

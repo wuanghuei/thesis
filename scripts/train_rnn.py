@@ -16,8 +16,8 @@ try:
     # Adjust path if your model file is elsewhere
     from src.models.rnn_postprocessor import RNNPostProcessor 
 except ImportError:
-    print("Error: Could not import RNNPostProcessor from src/models/rnn_postprocessor.py")
-    print("Please ensure the file exists and is in the correct directory.")
+    print("Could not import RNNPostProcessor from src/models/rnn_postprocessor py")
+    print("Please ensure the file exists and is in the correct directory")
     exit()
 
 # ====== Dataset Class ======
@@ -30,7 +30,7 @@ class RNNDataset(Dataset):
         """
         self.data_files = glob.glob(os.path.join(data_dir, "*.npz"))
         if not self.data_files:
-            raise FileNotFoundError(f"No .npz files found in directory: {data_dir}")
+            raise FileNotFoundError(f"No npz files found in directory: {data_dir}")
         print(f"Found {len(self.data_files)} data files in {data_dir}")
 
     def __len__(self):
@@ -40,65 +40,43 @@ class RNNDataset(Dataset):
         filepath = self.data_files[idx]
         try:
             data = np.load(filepath)
-            # Ensure data types are correct for tensors
-            features = torch.tensor(data['features'], dtype=torch.float32) # (T, input_size)
-            labels = torch.tensor(data['labels'], dtype=torch.long)     # (T,)
+            features = torch.tensor(data['features'], dtype=torch.float32)
+            labels = torch.tensor(data['labels'], dtype=torch.long)
             return features, labels
         except Exception as e:
-            print(f"Error loading or processing file {filepath}: {e}")
-            # Return dummy data or skip? For simplicity, let's return None and handle in collate_fn
-            # Or raise error? Raising might be better during debugging.
-            raise # Reraise the exception to stop training if a file is corrupted
+            print(f"loading or processing file {filepath}: {e}")
+            raise e
 
-# ====== Collate Function for Padding ======
 def collate_fn(batch):
     """Pads sequences within a batch and returns features, labels, and lengths."""
-    # Filter out potential None items if __getitem__ were to return None on error
-    # batch = [item for item in batch if item is not None]
-    # if not batch: return None, None, None # Handle empty batch
-    
-    # Separate features and labels
+
     features_list = [item[0] for item in batch]
     labels_list = [item[1] for item in batch]
     
-    # Get sequence lengths BEFORE padding
     lengths = torch.tensor([len(seq) for seq in features_list], dtype=torch.long)
-    
-    # Pad features (batch_first=True means output shape is B x T x F)
-    # Use 0.0 for padding features
+ 
     features_padded = pad_sequence(features_list, batch_first=True, padding_value=0.0)
-    
-    # Pad labels
-    # Use -100 for padding labels, as CrossEntropyLoss ignores this index by default
+
     labels_padded = pad_sequence(labels_list, batch_first=True, padding_value=-100)
     
     return features_padded, labels_padded, lengths
 
-# ====== Training and Validation Functions ======
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
     
     progress_bar = tqdm(dataloader, desc="Training", leave=False)
     for features, labels, lengths in progress_bar:
-        if features is None: continue # Skip if collate_fn returned None
+        if features is None: continue
         
         features, labels = features.to(device), labels.to(device)
         
-        # Zero gradients
         optimizer.zero_grad()
         
-        # Forward pass
-        # Pass lengths only if model uses packing (RNNPostProcessor does)
-        logits = model(features, lengths) # Shape: (B, T, C)
-        
-        # Calculate loss
-        # CrossEntropyLoss expects logits as (N, C) and labels as (N)
-        # N = total number of non-padded elements = B * T (in padded terms)
-        # We need to filter based on padding later if needed, but CEL handles ignore_index
+        logits = model(features, lengths)
+
         loss = criterion(logits.view(-1, logits.shape[-1]), labels.view(-1))
         
-        # Backward pass and optimize
         loss.backward()
         optimizer.step()
         
@@ -118,10 +96,8 @@ def validate(model, dataloader, criterion, device):
             
             features, labels = features.to(device), labels.to(device)
             
-            # Forward pass
             logits = model(features, lengths)
             
-            # Calculate loss
             loss = criterion(logits.view(-1, logits.shape[-1]), labels.view(-1))
             
             total_loss += loss.item()
@@ -129,44 +105,36 @@ def validate(model, dataloader, criterion, device):
             
     return total_loss / len(dataloader)
 
-# ====== Main Training Script ======
 def main(args):
 
-    # --- Load Configuration ---
     config_path = Path(args.config)
     if not config_path.is_file():
-        print(f"❌ Error: Config file not found at {config_path}")
+        print(f"Config file not found at {config_path}")
         exit(1)
     try:
         with open(config_path, 'r') as f:
             cfg = yaml.safe_load(f)
-            print(f"✅ Loaded configuration from {config_path}")
+            print(f"Loaded configuration from {config_path}")
     except Exception as e:
-        print(f"❌ Error loading config file {config_path}: {e}")
+        print(f"loading config file {config_path}: {e}")
         exit(1)
 
-    # --- Extract Config Sections ---
-    # Use .get() with default empty dicts to handle missing sections gracefully
     global_cfg = cfg.get('global', {})
     data_cfg = cfg.get('data', {})
     rnn_cfg = cfg.get('rnn_training', {})
 
-    # --- Override Config with CLI Args ---
-    # Data paths (cannot be overridden by CLI in this setup, defined in config)
     train_data_dir = Path(data_cfg.get('rnn_processed_data')/ 'train')
     val_data_dir = Path(data_cfg.get('rnn_processed_data')/ 'val')
     checkpoint_dir = Path(data_cfg.get('rnn_model_checkpoints'))
     best_checkpoint_name = data_cfg.get('rnn_best_checkpoint_name', 'best_rnn_model.pth')
 
 
-    # Device configuration
     device_str = global_cfg.get('device', 'auto').lower()
     if device_str == 'auto':
         DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         DEVICE = torch.device(device_str)
 
-    # Ensure checkpoint directory exists
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Using device: {DEVICE}")
@@ -197,22 +165,22 @@ def main(args):
         val_dataset = RNNDataset(str(val_data_dir))
     except FileNotFoundError as e:
         print(f"Error: {e}")
-        print("Please ensure Phase 1 (1_generate_rnn_data.py) completed successfully and data exists.")
+        print("Please ensure Phase 1 (1_generate_rnn_data py) completed successfully and data exists")
         exit()
 
     # Create DataLoaders
     # Make validation batch size configurable or keep fixed factor?
-    val_batch_size = train_cfg.get('val_batch_size', train_cfg['batch_size'] * 2)
+    val_batch_size = rnn_cfg.get('val_batch_size', rnn_cfg['batch_size'] * 2)
     train_loader = DataLoader(train_dataset,
-                              batch_size=train_cfg['batch_size'],
+                              batch_size=rnn_cfg['batch_size'],
                               shuffle=True,
                               collate_fn=collate_fn,
-                              num_workers=train_cfg['num_workers'])
+                              num_workers=rnn_cfg['num_workers'])
     val_loader = DataLoader(val_dataset,
                             batch_size=val_batch_size,
                             shuffle=False,
                             collate_fn=collate_fn,
-                            num_workers=train_cfg['num_workers'])
+                            num_workers=rnn_cfg['num_workers'])
 
     # Initialize Model
     model = RNNPostProcessor(
@@ -258,7 +226,7 @@ def main(args):
 
         # Save best model
         if val_loss < best_val_loss:
-            print(f"  Validation loss improved ({best_val_loss:.4f} -> {val_loss:.4f}). Saving model...")
+            print(f"  Validation loss improved ({best_val_loss:.4f} -> {val_loss:.4f}) Saving model")
             best_val_loss = val_loss
             # Use Path object and config name
             checkpoint_path = checkpoint_dir / best_checkpoint_name
@@ -277,14 +245,14 @@ def main(args):
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
-            print(f"  Validation loss did not improve. Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{train_cfg['patience']} epochs without improvement)")
+            print(f"  Validation loss did not improve Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{train_cfg['patience']} epochs without improvement)")
 
         # Early stopping
         if epochs_no_improve >= rnn_cfg['patience']: # Use config patience
-            print(f"Early stopping triggered after {rnn_cfg['patience']} epochs without improvement.")
+            print(f"Early stopping triggered after {rnn_cfg['patience']} epochs without improvement")
             break
 
-    print("Training finished.")
+    print("Training finished")
     print(f"Best validation loss achieved: {best_val_loss:.4f}")
     # Use Path object and config name
     print(f"Best model saved to: {checkpoint_dir / best_checkpoint_name}")

@@ -14,18 +14,18 @@ from src.evaluation import compute_final_metrics
 try:
     from src.models.rnn_postprocessor import RNNPostProcessor
 except ImportError:
-    print("Error: Could not import RNNPostProcessor from src/models/rnn_postprocessor.py")
+    print("Could not import RNNPostProcessor from src.models/rnn_postprocessor py")
     exit()
     
 
 def _run_rnn_on_all_videos(rnn_model, all_raw_preds, all_batch_meta, global_action_gt_by_video, device, num_classes, background_label):
-    print("\nStep 4: Running RNN Post-Processing...")
+    print("Step 4: Running RNN Post-Processing")
     rnn_predictions_by_video = defaultdict(lambda: defaultdict(list))
     rnn_all_action_preds_flat = defaultdict(list)
     
     unique_video_ids_to_process = sorted(list(global_action_gt_by_video.keys()))
     if not unique_video_ids_to_process:
-         print("No unique video IDs found in metadata. Cannot run RNN post-processing.")
+         print("No unique video IDs found in metadata Cannot run RNN post-processing")
          return rnn_predictions_by_video, rnn_all_action_preds_flat
 
     for video_id in tqdm(unique_video_ids_to_process, desc="RNN Processing Videos"):
@@ -76,39 +76,39 @@ def main_evaluate(cfg, args):
     print(f"Loading base model inference results from: {inference_output_path}")
     
     if not inference_output_path or not os.path.exists(inference_output_path):
-        print(f"Error: Inference results file not found or not specified: {inference_output_path}")
+        print(f"Inference results file not found or not specified: {inference_output_path}")
         return
 
-    print(f"\n-- Loading pre-computed inference results from: {inference_output_path} --")
+    print(f"Loading pre-computed inference results from: {inference_output_path}")
     try:
         with open(inference_output_path, 'rb') as f:
             inference_results = pickle.load(f)
         all_raw_preds = inference_results['all_raw_preds']
         all_batch_meta = inference_results['all_batch_meta']
-        print(f"Successfully loaded inference results for {len(all_raw_preds)} batches.")
+        print(f"Successfully loaded inference results for {len(all_raw_preds)} batches")
     except Exception as e:
-        print(f"Error loading inference results: {e}.")
+        print(f"loading inference results: {e}")
         return
 
-    print("\nStep 2: Calculating Global Ground Truth...")
+    print("Step 2: Calculating Global Ground Truth")
     final_global_gt, total_global_gt_segments, global_action_gt_by_video = calculate_global_gt(all_batch_meta, num_classes)
-    print(f"Global GT calculated. Total unique GT segments: {total_global_gt_segments}")
+    print(f"Global GT calculated Total unique GT segments: {total_global_gt_segments}")
     for c in range(num_classes):
         print(f"  Class {c} GT count: {len(final_global_gt.get(c, []))}")
 
-    print("\nStep 3: Loading RNN Post-Processor Model...")
+    print("Step 3: Loading RNN Post-Processor Model")
     if not os.path.exists(rnn_checkpoint_path):
-        print(f"Error: RNN checkpoint not found at {rnn_checkpoint_path}")
+        print(f"RNN checkpoint not found at {rnn_checkpoint_path}")
         return
         
     try:
         rnn_checkpoint = torch.load(rnn_checkpoint_path, map_location=device)
         rnn_args_loaded = rnn_checkpoint.get('args', None)
         if rnn_args_loaded:
-             print("Using RNN hyperparameters from checkpoint.")
+             print("Using RNN hyperparameters from checkpoint")
              rnn_model_cfg = rnn_args_loaded
         else:
-             print("Warning: RNN checkpoint does not contain training arguments. Using config file.")
+             print("RNN checkpoint does not contain training arguments Using config file")
              rnn_model_cfg = cfg['rnn_training']['model']
 
         rnn_input_size = 3 * num_classes 
@@ -129,7 +129,7 @@ def main_evaluate(cfg, args):
         print(f"Successfully loaded RNN model from epoch {rnn_checkpoint.get('epoch', 'N/A')}")
         
     except Exception as e:
-        print(f"Error loading RNN checkpoint: {e}")
+        print(f"loading RNN checkpoint: {e}")
         return
 
     rnn_predictions_by_video, rnn_all_action_preds_flat = _run_rnn_on_all_videos(
@@ -137,7 +137,7 @@ def main_evaluate(cfg, args):
         device, num_classes, background_label
     )
 
-    print("\nStep 5, 6, 7: Calculating final metrics...")
+    print("Step 5, 6, 7: Calculating final metrics")
 
     rnn_all_frame_targets_flat = []
     rnn_all_frame_preds_flat_for_metric = []
@@ -215,9 +215,9 @@ def main_evaluate(cfg, args):
         fps = args.fps if args.fps is not None else vis_cfg['fps']
         
         if not frames_template:
-             print("Error: --frames_npz_path_template or config['pipeline_evaluation']['visualization']['frames_npz_template'] is required.")
+             print("--frames_npz_path_template or config['pipeline_evaluation']['visualization']['frames_npz_template'] is required")
         elif not output_video_path:
-             print("Error: --output_video_path or config['pipeline_evaluation']['visualization']['output_video_path'] is required.")
+             print("--output_video_path or config['pipeline_evaluation']['visualization']['output_video_path'] is required")
         else:
             try:
                 vis_npz_path = frames_template.format(video_id=vis_video_id)
@@ -226,7 +226,7 @@ def main_evaluate(cfg, args):
                 if output_dir and not os.path.exists(output_dir):
                     os.makedirs(output_dir)
             except Exception as e:
-                 print(f"Error formatting visualization paths: {e}")
+                 print(f"formatting visualization paths: {e}")
                  vis_npz_path = None
                  formatted_output_video_path = None
 
@@ -241,9 +241,9 @@ def main_evaluate(cfg, args):
                     num_classes=num_classes
                 )
             elif vis_npz_path and not os.path.exists(vis_npz_path):
-                 print(f"Error: Visualization frames file not found: {vis_npz_path}")
+                 print(f"Visualization frames file not found: {vis_npz_path}")
             elif not formatted_output_video_path:
-                 print("Error: Could not determine visualization output path.")
+                 print("Could not determine visualization output path")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Base Model + RNN Post-Processor Pipeline")
@@ -263,9 +263,9 @@ if __name__ == "__main__":
         with open(args.config, 'r') as f:
             cfg = yaml.safe_load(f)
     except FileNotFoundError:
-        print(f"Error: Config file not found at {args.config}")
+        print(f"Config file not found at {args.config}")
         exit()
     except Exception as e:
-        print(f"Error loading config file: {e}")
+        print(f"loading config file: {e}")
         exit()
     main_evaluate(cfg, args) 
