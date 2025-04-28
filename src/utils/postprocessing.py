@@ -122,7 +122,7 @@ def merge_cross_window_detections(all_window_detections, all_window_metadata, io
     
     return merged_results
 
-def post_process(model, action_probs, start_probs, end_probs, class_thresholds, boundary_threshold, nms_threshold, min_segment_length):
+def post_process(action_probs, start_probs, end_probs, class_thresholds, boundary_threshold, nms_threshold, min_segment_length):
     """Post-processing đơn giản hóa:
     1. Tìm start/end candidates > boundary_threshold.
     2. Tạo tất cả các cặp (start, end) hợp lệ (đúng min_length).
