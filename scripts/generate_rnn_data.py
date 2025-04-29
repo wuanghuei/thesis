@@ -29,7 +29,7 @@ except ImportError:
     print("ActionDetectionLoss not found")
     exit()
 
-def run_inference(model, data_loader, device, use_mixed_precision):
+def run_inference(model, data_loader, device):
     model.eval()
     all_raw_preds = []
     all_batch_meta = []
@@ -47,7 +47,7 @@ def run_inference(model, data_loader, device, use_mixed_precision):
             frames = frames.to(device)
             if pose_data is not None: pose_data = pose_data.to(device)
 
-            with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+            with torch.cuda.amp.autocast(enabled=True):
                 predictions = model(frames, pose_data)
 
             action_probs = torch.sigmoid(predictions['action_scores']).cpu().detach()
@@ -67,7 +67,6 @@ def main(cfg, args):
 
     num_classes = cfg['global']['num_classes']
     window_size = cfg['global']['window_size']
-    use_mixed_precision = cfg['rnn_data_generation']['use_mixed_precision']
     dl_cfg = cfg['rnn_data_generation']['dataloader']
     data_cfg = cfg['data']
 
@@ -115,7 +114,7 @@ def main(cfg, args):
 
     print("Preparing Training Set Inference")
     train_loader = get_train_loader(batch_size=dl_cfg['train_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
-    train_raw_preds, train_batch_meta = run_inference(model, train_loader, device, use_mixed_precision)
+    train_raw_preds, train_batch_meta = run_inference(model, train_loader, device)
     print(f"\nSaving training inference results to: {train_pkl_path}")
     try:
         with open(train_pkl_path, 'wb') as f:
@@ -125,7 +124,7 @@ def main(cfg, args):
 
     print("Preparing Validation Set Inference")
     val_loader = get_val_loader(batch_size=dl_cfg['val_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
-    val_raw_preds, val_batch_meta = run_inference(model, val_loader, device, use_mixed_precision)
+    val_raw_preds, val_batch_meta = run_inference(model, val_loader, device)
     print(f"\nSaving validation inference results to: {val_pkl_path}")
     try:
         with open(val_pkl_path, 'wb') as f:
@@ -135,7 +134,7 @@ def main(cfg, args):
 
     print("Preparing Test Set Inference")
     test_loader = get_test_loader(batch_size=dl_cfg['test_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
-    test_raw_preds, test_batch_meta = run_inference(model, test_loader, device, use_mixed_precision)
+    test_raw_preds, test_batch_meta = run_inference(model, test_loader, device)
     print(f"\nSaving test inference results to: {test_pkl_path}")
     try:
         with open(test_pkl_path, 'wb') as f:
