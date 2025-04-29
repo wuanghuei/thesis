@@ -8,11 +8,11 @@ from collections import defaultdict
 import yaml
 
 import src.utils.helpers as helpers
-from src.utils.postprocessing import labels_to_segments
-from src.utils.visualization import visualize_rnn_predictions
-from src.evaluation import compute_final_metrics
+import src.utils.postprocessing as postprocessing
+import src.utils.visualization as visualization
+import src.evaluation as evaluation
 try:
-    from src.models.rnn_postprocessor import RNNPostProcessor
+    import src.models.rnn_postprocessor as rnn_postprocessor
 except ImportError:
     print("Could not import RNNPostProcessor from src.models/rnn_postprocessor py")
     exit()
@@ -41,7 +41,7 @@ def _run_rnn_on_all_videos(rnn_model, all_raw_preds, all_batch_meta, global_acti
             logits = rnn_model(input_tensor)
             probs = torch.softmax(logits.squeeze(0), dim=1)
         predicted_labels = torch.argmax(logits.squeeze(0), dim=1).cpu().numpy()
-        video_segments = labels_to_segments(predicted_labels, ignore_label=background_label)
+        video_segments = postprocessing.labels_to_segments(predicted_labels, ignore_label=background_label)
         for action_id, segments in video_segments.items():
             processed_segments = []
             for s in segments:
@@ -114,7 +114,7 @@ def main_evaluate(cfg, args):
         rnn_input_size = 3 * num_classes 
         rnn_num_classes_out = num_classes + 1
 
-        rnn_model = RNNPostProcessor(
+        rnn_model = rnn_postprocessor.RNNPostProcessor(
             input_size=rnn_input_size,
             hidden_size=rnn_model_cfg['hidden_size'],
             num_layers=rnn_model_cfg['num_layers'],
@@ -174,7 +174,7 @@ def main_evaluate(cfg, args):
         rnn_all_frame_targets_flat.extend(video_targets.flatten())
         rnn_all_frame_preds_flat_for_metric.extend(video_preds.flatten()) 
 
-    final_metrics = compute_final_metrics(
+    final_metrics = evaluation.compute_final_metrics(
         global_action_gt_global=final_global_gt, 
         merged_all_action_preds=rnn_all_action_preds_flat, 
         merged_all_frame_targets=rnn_all_frame_targets_flat, 
@@ -231,7 +231,7 @@ def main_evaluate(cfg, args):
                  formatted_output_video_path = None
 
             if vis_npz_path and os.path.exists(vis_npz_path) and formatted_output_video_path:
-                visualize_rnn_predictions(
+                visualization.visualize_rnn_predictions(
                     video_id=vis_video_id,
                     frames_npz_path=vis_npz_path,
                     output_video_path=formatted_output_video_path,
