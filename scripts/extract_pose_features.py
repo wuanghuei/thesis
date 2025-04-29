@@ -6,7 +6,7 @@ from tqdm import tqdm
 import glob
 import yaml
 from pathlib import Path
-from src.utils.feature_extraction import extract_pose_features
+import src.utils.feature_extraction as feature_extraction
 
 mp_pose = mp.solutions.pose
 
@@ -35,7 +35,7 @@ def process_video(video_id, frames_dir, pose_dir, pose_config):
         
         for i in tqdm(range(num_frames), desc=f"Processing {video_id}"):
             frame = frames[i]
-            pose_features[i] = extract_pose_features(frame, pose_detector)
+            pose_features[i] = feature_extraction.extract_pose_features(frame, pose_detector)
             
     
     pose_output_path = Path(pose_dir) / f"{video_id}_pose.npz"

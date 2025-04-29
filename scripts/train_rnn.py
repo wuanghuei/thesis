@@ -14,7 +14,7 @@ from pathlib import Path
 # Import the RNN model definition
 try:
     # Adjust path if your model file is elsewhere
-    from src.models.rnn_postprocessor import RNNPostProcessor 
+    import src.models.rnn_postprocessor as rnn_postprocessor
 except ImportError:
     print("Could not import RNNPostProcessor from src/models/rnn_postprocessor py")
     print("Please ensure the file exists and is in the correct directory")
@@ -183,7 +183,7 @@ def main(args):
                             num_workers=rnn_cfg['num_workers'])
 
     # Initialize Model
-    model = RNNPostProcessor(
+    model = rnn_postprocessor.RNNPostProcessor(
         input_size=rnn_cfg['model']['input_size'],
         hidden_size=rnn_cfg['model']['hidden_size'],
         num_layers=rnn_cfg['model']['num_layers'],
@@ -245,7 +245,7 @@ def main(args):
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
-            print(f"  Validation loss did not improve Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{train_cfg['patience']} epochs without improvement)")
+            print(f"  Validation loss did not improve Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{rnn_cfg['patience']} epochs without improvement)")
 
         # Early stopping
         if epochs_no_improve >= rnn_cfg['patience']: # Use config patience

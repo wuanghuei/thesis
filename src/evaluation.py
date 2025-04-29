@@ -1,19 +1,19 @@
-from src.utils.helpers import calculate_temporal_iou
-from src.utils.metrics import calculate_mAP, calculate_class_mAP, calculate_map_mid, calculate_f1_at_iou
-from src.utils.postprocessing import merge_cross_window_detections, resolve_cross_class_overlaps
+import src.utils.helpers as helpers
+import src.utils.metrics as metrics
+import src.utils.postprocessing as postprocessing
 from collections import defaultdict
 import numpy as np
 from sklearn.metrics import precision_recall_fscore_support
 
 
 def compute_final_metrics(all_window_detections, all_window_metadata, all_frame_preds, all_frame_targets, num_classes):
-    merged_video_detections = merge_cross_window_detections(
+    merged_video_detections = postprocessing.merge_cross_window_detections(
         all_window_detections, 
         all_window_metadata,
         iou_threshold=0.2,
         confidence_threshold=0.15
         )
-    merged_video_detections = resolve_cross_class_overlaps(merged_video_detections)
+    merged_video_detections = postprocessing.resolve_cross_class_overlaps(merged_video_detections)
     precision, recall, f1, _ = precision_recall_fscore_support(
         all_frame_targets, all_frame_preds, average='macro', zero_division=0
     )
@@ -56,7 +56,7 @@ def compute_final_metrics(all_window_detections, all_window_metadata, all_frame_
         print(f"\nVideo {video_id}: {len(detections)} detections after merging") 
         detections = sorted(detections, key=lambda x: (x['action_id'], x['start_frame']))
     
-    mAP = calculate_mAP(all_action_gt_global, merged_all_action_preds, num_classes)
+    mAP = metrics.calculate_mAP(all_action_gt_global, merged_all_action_preds, num_classes)
 
     merged_all_frame_preds = []
     merged_all_frame_targets = []
@@ -130,7 +130,7 @@ def compute_final_metrics(all_window_detections, all_window_metadata, all_frame_
             best_idx = -1
             for i, gt in enumerate(all_action_gt_global[c]):
                 if not gt_matched[i]:
-                    iou = calculate_temporal_iou(pred['segment'], gt)
+                    iou = helpers.calculate_temporal_iou(pred['segment'], gt)
                     if iou > best_iou:
                         best_iou = iou
                         best_idx = i
@@ -152,7 +152,7 @@ def compute_final_metrics(all_window_detections, all_window_metadata, all_frame_
     print("\nmAP by class")
     
     for c in range(num_classes):
-        class_ap = calculate_class_mAP(all_action_gt_global[c], merged_all_action_preds[c])
+        class_ap = metrics.calculate_class_mAP(all_action_gt_global[c], merged_all_action_preds[c])
         class_ap_dict[c] = class_ap
         num_gt = len(all_action_gt_global[c])
         num_pred = len(merged_all_action_preds[c])
@@ -176,7 +176,7 @@ def compute_final_metrics(all_window_detections, all_window_metadata, all_frame_
             if len(all_action_gt_global[c]) == 0: 
                 continue
             
-            _, _, class_f1 = calculate_f1_at_iou(all_action_gt_global[c], merged_all_action_preds[c], iou)
+            _, _, class_f1 = metrics.calculate_f1_at_iou(all_action_gt_global[c], merged_all_action_preds[c], iou)
             all_class_f1.append(class_f1)
             print(f"Class {c} - F1@{iou:.2f}: {class_f1:.4f}")
         
@@ -184,7 +184,7 @@ def compute_final_metrics(all_window_detections, all_window_metadata, all_frame_
         avg_f1_scores[f'avg_f1_iou_{iou:.2f}'.replace('.', '')] = avg_f1
         print(f"Average F1@{iou:.2f}: {avg_f1:.4f}")
 
-    map_mid = calculate_map_mid(all_action_gt_global, merged_all_action_preds, num_classes)
+    map_mid = metrics.calculate_map_mid(all_action_gt_global, merged_all_action_preds, num_classes)
     print(f"mAP@mid: {map_mid:.4f}")
 
     accuracy = total_correct / max(1, total_global_gt_segments)

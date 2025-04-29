@@ -11,20 +11,20 @@ import json
 import yaml
 from pathlib import Path
 
-from src.utils.helpers import process_predictions_for_rnn
+import src.utils.helpers as helpers
 
 try:
-    from src.models.base_detector import TemporalActionDetector
+    import src.models.base_detector as base_detector
 except ImportError:
     print("Could not import TemporalActionDetector from src models model_fixed Make sure the file exists")
     exit()
 try:
-    from src.dataloader import get_train_loader, get_val_loader, get_test_loader
+    import src.dataloader as dataloader
 except ImportError:
     print("Could not import get_train_loader/get_val_loader/get_test_loader from src dataloader")
     exit()
 try:
-    from src.losses import ActionDetectionLoss
+    import src.losses as losses
 except ImportError:
     print("ActionDetectionLoss not found")
     exit()
@@ -93,7 +93,7 @@ def main(cfg, args):
     print(f"Using device: {device}")
     print(f"Loading base model checkpoint: {checkpoint_path}")
 
-    model = TemporalActionDetector(num_classes=num_classes, window_size=window_size)
+    model = base_detector.TemporalActionDetector(num_classes=num_classes, window_size=window_size)
     model = model.to(device)
 
     if Path(checkpoint_path).exists():
@@ -113,7 +113,7 @@ def main(cfg, args):
         exit()
 
     print("Preparing Training Set Inference")
-    train_loader = get_train_loader(batch_size=dl_cfg['train_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
+    train_loader = dataloader.get_train_loader(batch_size=dl_cfg['train_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
     train_raw_preds, train_batch_meta = run_inference(model, train_loader, device)
     print(f"\nSaving training inference results to: {train_pkl_path}")
     try:
@@ -123,7 +123,7 @@ def main(cfg, args):
     except Exception as e: print(f"saving training inference results: {e}")
 
     print("Preparing Validation Set Inference")
-    val_loader = get_val_loader(batch_size=dl_cfg['val_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
+    val_loader = dataloader.get_val_loader(batch_size=dl_cfg['val_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
     val_raw_preds, val_batch_meta = run_inference(model, val_loader, device)
     print(f"\nSaving validation inference results to: {val_pkl_path}")
     try:
@@ -133,7 +133,7 @@ def main(cfg, args):
     except Exception as e: print(f"saving validation inference results: {e}")
 
     print("Preparing Test Set Inference")
-    test_loader = get_test_loader(batch_size=dl_cfg['test_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
+    test_loader = dataloader.get_test_loader(batch_size=dl_cfg['test_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
     test_raw_preds, test_batch_meta = run_inference(model, test_loader, device)
     print(f"\nSaving test inference results to: {test_pkl_path}")
     try:
@@ -145,7 +145,7 @@ def main(cfg, args):
     print("Processing raw data into RNN input format")
 
     print("Processing Training Data for RNN")
-    process_predictions_for_rnn(
+    helpers.process_predictions_for_rnn(
         all_raw_preds=train_raw_preds,
         all_batch_meta=train_batch_meta,
         num_classes=num_classes,
@@ -156,7 +156,7 @@ def main(cfg, args):
     )
 
     print("Processing Validation Data for RNN")
-    process_predictions_for_rnn(
+    helpers.process_predictions_for_rnn(
         all_raw_preds=val_raw_preds,
         all_batch_meta=val_batch_meta,
         num_classes=num_classes,
@@ -167,7 +167,7 @@ def main(cfg, args):
     )
     
     print("Processing Test Data for RNN")
-    process_predictions_for_rnn(
+    helpers.process_predictions_for_rnn(
         all_raw_preds=test_raw_preds,
         all_batch_meta=test_batch_meta,
         num_classes=num_classes,

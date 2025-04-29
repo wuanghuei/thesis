@@ -7,7 +7,7 @@ from tqdm import tqdm
 from collections import defaultdict
 import yaml
 
-from src.utils.helpers import reconstruct_full_video_probs, calculate_global_gt
+import src.utils.helpers as helpers
 from src.utils.postprocessing import labels_to_segments
 from src.utils.visualization import visualize_rnn_predictions
 from src.evaluation import compute_final_metrics
@@ -29,7 +29,7 @@ def _run_rnn_on_all_videos(rnn_model, all_raw_preds, all_batch_meta, global_acti
          return rnn_predictions_by_video, rnn_all_action_preds_flat
 
     for video_id in tqdm(unique_video_ids_to_process, desc="RNN Processing Videos"):
-        avg_action_probs, avg_start_probs, avg_end_probs, num_frames = reconstruct_full_video_probs(
+        avg_action_probs, avg_start_probs, avg_end_probs, num_frames = helpers.reconstruct_full_video_probs(
             video_id, all_raw_preds, all_batch_meta
         )      
         if num_frames is None or num_frames <= 0:
@@ -91,7 +91,7 @@ def main_evaluate(cfg, args):
         return
 
     print("Step 2: Calculating Global Ground Truth")
-    final_global_gt, total_global_gt_segments, global_action_gt_by_video = calculate_global_gt(all_batch_meta, num_classes)
+    final_global_gt, total_global_gt_segments, global_action_gt_by_video = helpers.calculate_global_gt(all_batch_meta, num_classes)
     print(f"Global GT calculated Total unique GT segments: {total_global_gt_segments}")
     for c in range(num_classes):
         print(f"  Class {c} GT count: {len(final_global_gt.get(c, []))}")

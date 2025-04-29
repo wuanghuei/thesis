@@ -12,13 +12,13 @@ import argparse
 from collections import defaultdict
 
 
-from src.models.base_detector import TemporalActionDetector 
-from src.dataloader import get_train_loader, get_val_loader, get_test_loader
-from src.utils.helpers import set_seed, process_for_evaluation
-from src.utils.debugging import debug_detection_stats, debug_raw_predictions
-from src.losses import ActionDetectionLoss
-from src.evaluation import compute_final_metrics
-from src.utils.postprocessing import post_process
+import src.models.base_detector as base_detector
+import src.dataloader as dataloader
+import src.utils.helpers as helpers
+import src.utils.debugging as debugging
+import src.losses as losses
+import src.evaluation as evaluation
+import src.utils.postprocessing as postprocessing
 
 
 def train(
@@ -238,7 +238,7 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
             end_probs = torch.sigmoid(predictions['end_scores'])
         
 
-            batch_detections = post_process(
+            batch_detections = postprocessing.post_process(
                 action_probs=action_probs,
                 start_probs=start_probs,
                 end_probs=end_probs,
@@ -249,19 +249,19 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
 
                  
             if eval_cfg['debugging']['debug_detection_enabled']:
-                debug_detection_stats(batch_detections, frames.shape[0], metadata)
+                debugging.debug_detection_stats(batch_detections, frames.shape[0], metadata)
             
             
             all_window_detections.extend(batch_detections)
             all_window_metadata.extend(metadata)
             
             for i, (dets, meta) in enumerate(zip(batch_detections, metadata)):
-                preds, targets = process_for_evaluation(dets, meta['annotations'], action_masks[i].cpu(), frames.shape[2], num_classes)
+                preds, targets = helpers.process_for_evaluation(dets, meta['annotations'], action_masks[i].cpu(), frames.shape[2], num_classes)
                 all_frame_preds_flat.extend(preds)
                 all_frame_targets_flat.extend(targets)
 
 
-    final_metrics = compute_final_metrics(
+    final_metrics = evaluation.compute_final_metrics(
         all_window_detections,
         all_window_metadata,
         all_frame_preds_flat,
@@ -296,7 +296,7 @@ def main():
     sched_cfg = train_cfg['scheduler']
     loss_cfg = train_cfg['loss']
 
-    set_seed(global_cfg['seed'])
+    helpers.set_seed(global_cfg['seed'])
 
     device = torch.device(global_cfg['device'])
     
@@ -304,16 +304,16 @@ def main():
     if torch.cuda.is_available(): print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Using config file: {args.config}")
 
-    train_loader = get_train_loader(batch_size=train_cfg['batch_size'], shuffle=True) 
-    val_loader = get_val_loader(batch_size=train_cfg['batch_size'], shuffle=False)
+    train_loader = dataloader.get_train_loader(batch_size=train_cfg['batch_size'], shuffle=True) 
+    val_loader = dataloader.get_val_loader(batch_size=train_cfg['batch_size'], shuffle=False)
 
-    model = TemporalActionDetector(
+    model = base_detector.TemporalActionDetector(
         num_classes=global_cfg['num_classes'], 
         window_size=global_cfg['window_size']
     ).to(device)
     print(f"Model: TemporalActionDetector with {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M parameters")
 
-    criterion = ActionDetectionLoss(
+    criterion = losses.ActionDetectionLoss(
         action_weight=loss_cfg['action_weight'], 
         start_weight=loss_cfg['start_weight'], 
         end_weight=loss_cfg['end_weight'], 
@@ -406,7 +406,7 @@ def main():
                 checkpoint = torch.load(best_model_path, map_location=device)
                 model.load_state_dict(checkpoint['model_state_dict'])
 
-                test_loader = get_test_loader(batch_size=train_cfg['batch_size'], shuffle=False)
+                test_loader = dataloader.get_test_loader(batch_size=train_cfg['batch_size'], shuffle=False)
 
                 test_metrics = evaluate(
                     model, test_loader, criterion, device,

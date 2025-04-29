@@ -174,3 +174,27 @@ def nms(detections, threshold):
         ]
     
     return keep
+
+def labels_to_segments(labels, ignore_label):
+
+    segments = defaultdict(list)
+    current_action = -1
+    start_frame = -1
+    T = len(labels)
+    for t in range(T):
+        label = labels[t]
+        if label != ignore_label and label != current_action:
+            if current_action != -1 and start_frame != -1:
+                segments[current_action].append({'start_frame': start_frame, 'end_frame': t})
+            current_action = label
+            start_frame = t
+        elif (label == ignore_label or label != current_action) and current_action != -1:
+            segments[current_action].append({'start_frame': start_frame, 'end_frame': t})
+            current_action = -1
+            start_frame = -1
+            if label != ignore_label:
+                 current_action = label
+                 start_frame = t
+    if current_action != -1 and start_frame != -1:
+        segments[current_action].append({'start_frame': start_frame, 'end_frame': T})
+    return segments

@@ -7,7 +7,7 @@ import argparse
 import yaml
 from pathlib import Path
 from tqdm import tqdm
-from src.utils.helpers import find_nearest_subsampled_idx
+import src.utils.helpers as helpers
 
 def prepare_full_video(video_path, label_path, output_dir_split, frame_size, subsample_factor):
     try:
@@ -89,8 +89,8 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
                      print(f"frame_indices empty for {video_id} Cannot map segments")
                      break
                      
-                 sub_start = find_nearest_subsampled_idx(start_frame, frame_indices)
-                 sub_end = find_nearest_subsampled_idx(end_frame, frame_indices)
+                 sub_start = helpers.find_nearest_subsampled_idx(start_frame, frame_indices)
+                 sub_end = helpers.find_nearest_subsampled_idx(end_frame, frame_indices)
 
                  if sub_end > sub_start:
                     action_annotations.append(

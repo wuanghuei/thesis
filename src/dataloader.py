@@ -4,8 +4,8 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import json
 from pathlib import Path
-from utils.feature_extraction import compute_velocity
-from utils.helpers import gaussian_kernel
+import src.utils.feature_extraction as feature_extraction
+import src.utils.helpers as helpers
 
 class FullVideoDataset(Dataset):
     def __init__(self, frames_dir, anno_dir, pose_dir, num_classes, window_size, mode='train'):
@@ -127,7 +127,7 @@ class FullVideoDataset(Dataset):
             if actual_pose.shape[0] > 0:
                 pose_data[actual_pose.shape[0]:] = actual_pose[-1]
         
-        velocity_data = compute_velocity(pose_data)
+        velocity_data = feature_extraction.compute_velocity(pose_data)
         
         pose_with_velocity = np.concatenate([pose_data, velocity_data], axis=1)
                 
@@ -150,8 +150,8 @@ class FullVideoDataset(Dataset):
             
             action_masks[action_id, s:e] = 1.0
             
-            start_mask[action_id] += gaussian_kernel(s, self.window_size, sigma=2.0)
-            end_mask[action_id] += gaussian_kernel(e-1, self.window_size, sigma=2.0)
+            start_mask[action_id] += helpers.gaussian_kernel(s, self.window_size, sigma=2.0)
+            end_mask[action_id] += helpers.gaussian_kernel(e-1, self.window_size, sigma=2.0)
             
         start_mask = torch.clamp(start_mask, 0, 1)
         end_mask = torch.clamp(end_mask, 0, 1)
