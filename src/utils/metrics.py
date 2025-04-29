@@ -1,4 +1,4 @@
-from .helpers import calculate_temporal_iou
+import src.utils.helpers as helpers
 from sklearn.metrics import precision_recall_fscore_support, average_precision_score
 import numpy as np
 
@@ -19,7 +19,7 @@ def calculate_f1_at_iou(gt_segments, pred_segments, iou_threshold):
         
         for i, gt_segment in enumerate(gt_segments):
             if not gt_matched[i]:
-                iou = calculate_temporal_iou(pred_segment, gt_segment)
+                iou = helpers.calculate_temporal_iou(pred_segment, gt_segment)
                 if iou > best_iou:
                     best_iou = iou
                     best_idx = i
@@ -61,7 +61,7 @@ def calculate_class_mAP(gt_segments, pred_segments, iou_threshold=0.5):
             if gt_detected[i]:
                 continue
             
-            iou = calculate_temporal_iou(pred_segment, gt_segment)
+            iou = helpers.calculate_temporal_iou(pred_segment, gt_segment)
             if iou > max_iou:
                 max_iou = iou
                 max_idx = i
