@@ -301,8 +301,8 @@ def main():
     if torch.cuda.is_available(): print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"Using config file: {args.config}")
 
-    train_loader = dataloader.get_train_loader(batch_size=train_cfg['batch_size'], shuffle=True) 
-    val_loader = dataloader.get_val_loader(batch_size=train_cfg['batch_size'], shuffle=False)
+    train_loader = dataloader.get_train_loader(cfg, shuffle=True) 
+    val_loader = dataloader.get_val_loader(cfg, shuffle=False)
 
     model = base_detector.TemporalActionDetector(
         num_classes=global_cfg['num_classes'], 
@@ -403,7 +403,7 @@ def main():
                 checkpoint = torch.load(best_model_path, map_location=device)
                 model.load_state_dict(checkpoint['model_state_dict'])
 
-                test_loader = dataloader.get_test_loader(batch_size=train_cfg['batch_size'], shuffle=False)
+                test_loader = dataloader.get_test_loader(cfg, shuffle=False)
 
                 test_metrics = evaluate(
                     model, test_loader, criterion, device,
