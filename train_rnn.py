@@ -157,7 +157,6 @@ def main(args):
     print(f"  Num Workers: {rnn_cfg['dataloader']['num_workers']}")
     print(f"-----------------------------")
 
-    # Load Datasets
     try:
         # Pass paths directly
         train_dataset = RNNDataset(str(train_data_dir))
