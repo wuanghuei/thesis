@@ -38,7 +38,7 @@ def run_inference(model, data_loader, device):
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Model Inference"):
             try:
-                frames, pose_data, _, _, _, _, metadata = batch
+                frames, pose_data, _, _, _, metadata = batch
             except ValueError:
                  print("Batch structure mismatch Trying simplified unpack (frames, pose, meta) Check dataloader")
                  try: frames, pose_data, metadata = batch
@@ -111,9 +111,9 @@ def main(cfg, args):
     else:
         print(f"Checkpoint file not found at {checkpoint_path}")
         exit()
-
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}")
     print("Preparing Training Set Inference")
-    train_loader = dataloader.get_train_loader(batch_size=dl_cfg['train_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
+    train_loader = dataloader.get_train_loader(cfg)
     train_raw_preds, train_batch_meta = run_inference(model, train_loader, device)
     print(f"\nSaving training inference results to: {train_pkl_path}")
     try:
@@ -123,7 +123,7 @@ def main(cfg, args):
     except Exception as e: print(f"saving training inference results: {e}")
 
     print("Preparing Validation Set Inference")
-    val_loader = dataloader.get_val_loader(batch_size=dl_cfg['val_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
+    val_loader = dataloader.get_val_loader(cfg)
     val_raw_preds, val_batch_meta = run_inference(model, val_loader, device)
     print(f"\nSaving validation inference results to: {val_pkl_path}")
     try:
@@ -133,7 +133,7 @@ def main(cfg, args):
     except Exception as e: print(f"saving validation inference results: {e}")
 
     print("Preparing Test Set Inference")
-    test_loader = dataloader.get_test_loader(batch_size=dl_cfg['test_batch_size'], shuffle=False, num_workers=dl_cfg['num_workers'])
+    test_loader = dataloader.get_test_loader(cfg)
     test_raw_preds, test_batch_meta = run_inference(model, test_loader, device)
     print(f"\nSaving test inference results to: {test_pkl_path}")
     try:
@@ -146,35 +146,29 @@ def main(cfg, args):
 
     print("Processing Training Data for RNN")
     helpers.process_predictions_for_rnn(
-        all_raw_preds=train_raw_preds,
-        all_batch_meta=train_batch_meta,
         num_classes=num_classes,
         window_size=window_size,
+        output_pkl=train_pkl_path,
         anno_dir=train_anno_dir,
-        output_dir=rnn_train_data_dir,
-        dataset_name="Train"
+        rnn_data_dir=rnn_train_data_dir
     )
 
     print("Processing Validation Data for RNN")
     helpers.process_predictions_for_rnn(
-        all_raw_preds=val_raw_preds,
-        all_batch_meta=val_batch_meta,
         num_classes=num_classes,
         window_size=window_size,
+        output_pkl=val_pkl_path,
         anno_dir=val_anno_dir,
-        output_dir=rnn_val_data_dir,
-        dataset_name="Validation"
+        rnn_data_dir=rnn_val_data_dir
     )
     
     print("Processing Test Data for RNN")
     helpers.process_predictions_for_rnn(
-        all_raw_preds=test_raw_preds,
-        all_batch_meta=test_batch_meta,
         num_classes=num_classes,
         window_size=window_size,
+        output_pkl=test_pkl_path,
         anno_dir=test_anno_dir,
-        output_dir=rnn_test_data_dir,
-        dataset_name="Test"
+        rnn_data_dir=rnn_test_data_dir
     )
 
 if __name__ == "__main__":
