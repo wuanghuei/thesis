@@ -11,7 +11,6 @@ from tqdm import tqdm
 import yaml
 from pathlib import Path
 
-# Import the RNN model definition
 try:
     # Adjust path if your model file is elsewhere
     import src.models.rnn_postprocessor as rnn_postprocessor
