@@ -2,15 +2,12 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 import numpy as np
-import os
 import json
 from datetime import datetime
 from torch.cuda.amp import autocast, GradScaler
 import yaml
 from pathlib import Path
 import argparse
-from collections import defaultdict
-
 
 import src.models.base_detector as base_detector
 import src.dataloader as dataloader
