@@ -12,21 +12,14 @@ import yaml
 from pathlib import Path
 
 try:
-    # Adjust path if your model file is elsewhere
     import src.models.rnn_postprocessor as rnn_postprocessor
 except ImportError:
     print("Could not import RNNPostProcessor from src/models/rnn_postprocessor py")
     print("Please ensure the file exists and is in the correct directory")
     exit()
 
-# ====== Dataset Class ======
 class RNNDataset(Dataset):
-    """Dataset to load preprocessed features and labels for RNN training."""
     def __init__(self, data_dir):
-        """
-        Args:
-            data_dir (str): Path to the directory containing .npz files.
-        """
         self.data_files = glob.glob(os.path.join(data_dir, "*.npz"))
         if not self.data_files:
             raise FileNotFoundError(f"No npz files found in directory: {data_dir}")
@@ -47,7 +40,6 @@ class RNNDataset(Dataset):
             raise e
 
 def collate_fn(batch):
-    """Pads sequences within a batch and returns features, labels, and lengths."""
 
     features_list = [item[0] for item in batch]
     labels_list = [item[1] for item in batch]
@@ -158,7 +150,6 @@ def main(args):
     print(f"-----------------------------")
 
     try:
-        # Pass paths directly
         train_dataset = RNNDataset(str(train_data_dir))
         val_dataset = RNNDataset(str(val_data_dir))
     except FileNotFoundError as e:
@@ -166,8 +157,6 @@ def main(args):
         print("Please ensure Phase 1 (1_generate_rnn_data py) completed successfully and data exists")
         exit()
 
-    # Create DataLoaders
-    # Make validation batch size configurable or keep fixed factor?
     val_batch_size = rnn_cfg.get('val_batch_size', rnn_cfg['batch_size'] * 2)
     train_loader = DataLoader(train_dataset,
                               batch_size=rnn_cfg['batch_size'],
@@ -180,7 +169,6 @@ def main(args):
                             collate_fn=collate_fn,
                             num_workers=rnn_cfg['num_workers'])
 
-    # Initialize Model
     model = rnn_postprocessor.RNNPostProcessor(
         input_size=rnn_cfg['model']['input_size'],
         hidden_size=rnn_cfg['model']['hidden_size'],
@@ -191,26 +179,21 @@ def main(args):
         bidirectional=rnn_cfg['model']['bidirectional']
     ).to(DEVICE)
 
-    # Loss and Optimizer
-    # Use ignore_index=-100 for padded values in labels
     criterion = nn.CrossEntropyLoss(ignore_index=-100)
     optimizer = optim.AdamW(model.parameters(), lr=rnn_cfg['optimizer']['lr'])
 
-    # Optional: Learning rate scheduler - make config more detailed if needed
     scheduler_factor = rnn_cfg['scheduler']['factor']
-    # Calculate scheduler patience based on training patience
     scheduler_patience = rnn_cfg['scheduler']['patience']
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min',
                                                      factor=scheduler_factor,
                                                      patience=scheduler_patience,
                                                      verbose=True)
 
-    # Training Loop
     best_val_loss = float('inf')
     epochs_no_improve = 0
 
     print("Starting Training...")
-    for epoch in range(rnn_cfg['epochs']): # Use config epochs
+    for epoch in range(rnn_cfg['epochs']): 
         print(f"--- Epoch {epoch+1}/{rnn_cfg['epochs']} ---")
 
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, DEVICE)
@@ -219,24 +202,20 @@ def main(args):
         val_loss = validate(model, val_loader, criterion, DEVICE)
         print(f"  Average Validation Loss: {val_loss:.4f}")
 
-        # Update LR scheduler
         scheduler.step(val_loss)
 
-        # Save best model
         if val_loss < best_val_loss:
             print(f"  Validation loss improved ({best_val_loss:.4f} -> {val_loss:.4f}) Saving model")
             best_val_loss = val_loss
-            # Use Path object and config name
             checkpoint_path = checkpoint_dir / best_checkpoint_name
             save_dict = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': best_val_loss,
-                # Store relevant config sections for reproducibility
                 'config': {
                     'rnn_training': rnn_cfg,
-                    'data': data_cfg # Include data paths used
+                    'data': data_cfg 
                  }
             }
             torch.save(save_dict, checkpoint_path)
@@ -245,20 +224,17 @@ def main(args):
             epochs_no_improve += 1
             print(f"  Validation loss did not improve Best loss: {best_val_loss:.4f} ({epochs_no_improve}/{rnn_cfg['patience']} epochs without improvement)")
 
-        # Early stopping
-        if epochs_no_improve >= rnn_cfg['patience']: # Use config patience
+        if epochs_no_improve >= rnn_cfg['patience']:
             print(f"Early stopping triggered after {rnn_cfg['patience']} epochs without improvement")
             break
 
     print("Training finished")
     print(f"Best validation loss achieved: {best_val_loss:.4f}")
-    # Use Path object and config name
     print(f"Best model saved to: {checkpoint_dir / best_checkpoint_name}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase 3: Train RNN Post-Processor")
 
-    # --- Config File Argument ---
     parser.add_argument("--config", type=str, default="configs/config.yaml",
                         help="Path to the YAML configuration file.")
 

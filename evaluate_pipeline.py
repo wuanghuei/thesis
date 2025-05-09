@@ -102,7 +102,6 @@ def main_evaluate(cfg, args):
         print(f"RNN checkpoint not found at {rnn_checkpoint_path}")
         return
         
-    # try:
     rnn_checkpoint = torch.load(rnn_checkpoint_path, map_location=device)
 
     print("RNN checkpoint does not contain training arguments Using config file")
@@ -125,9 +124,6 @@ def main_evaluate(cfg, args):
     rnn_model.eval() 
     print(f"Successfully loaded RNN model from epoch {rnn_checkpoint.get('epoch', 'N/A')}")
     
-    # except Exception as e:
-    #     print(f"loading RNN checkpoint: {e}")
-    #     return
 
     rnn_predictions_by_video, rnn_all_action_preds_flat = _run_rnn_on_all_videos(
         rnn_model, all_raw_preds, all_batch_meta, global_action_gt_by_video, 
@@ -243,7 +239,6 @@ def main_evaluate(cfg, args):
         avg_recall_scores[rec_key]  = np.mean(all_class_recall)if all_class_recall else 0.0
         avg_f1_scores[avg_key]  = np.mean(all_class_f1) if all_class_f1 else 0.0
 
-    # 3) Tính global frame-level precision/recall/f1
     merged_precision, merged_recall, merged_f1, _ = precision_recall_fscore_support(
         rnn_all_frame_targets_flat,
         rnn_all_frame_preds_flat,
@@ -344,7 +339,6 @@ if __name__ == "__main__":
     parser.add_argument("--rnn_checkpoint_path", type=str, default=None, help="Override RNN checkpoint path from config")
     parser.add_argument("--inference_output_path", type=str, default=None, help="Override inference results pkl path from config")
     
-    #Visualization
     parser.add_argument("--visualize_video_id", type=str, default=None, help="Optional video ID to visualize (overrides config)")
     parser.add_argument("--frames_npz_path_template", type=str, default=None, help="Override frame NPZ path template from config")
     parser.add_argument("--output_video_path", type=str, default=None, help="Override visualization output video path from config")
