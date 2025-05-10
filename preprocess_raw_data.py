@@ -71,6 +71,8 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
         return 0, 0, False
 
     action_annotations = []
+    action_segments = []
+    
     try:
         for action_idx, segments in enumerate(tlabs, start=1):
             if not isinstance(segments, (np.ndarray, list)) or len(segments) == 0:
@@ -92,19 +94,52 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
                  sub_end = helpers.find_nearest_subsampled_idx(end_frame, frame_indices)
 
                  if sub_end > sub_start:
-                    action_annotations.append(
-                        {
-                            "action_id": int(action_idx - 1),
-                            "action_name": f"action{action_idx}",
-                            "start_frame": int(sub_start),
-                            "end_frame": int(sub_end),
-                            "start_time": float(start_frame / max(fps, 1e-6)),
-                            "end_time": float(end_frame / max(fps, 1e-6)),
-                            "original_start": int(start_frame),
-                            "original_end": int(end_frame),
-                        }
-                    )
+                    action_anno = {
+                        "action_id": int(action_idx),
+                        "start_frame": int(sub_start),
+                        "end_frame": int(sub_end),
+                        "start_time": float(start_frame / max(fps, 1e-6)),
+                        "end_time": float(end_frame / max(fps, 1e-6)),
+                        "original_start": int(start_frame),
+                        "original_end": int(end_frame),
+                    }
+                    action_annotations.append(action_anno)
+                    action_segments.append((sub_start, sub_end))
             if not frame_indices: break
+
+        # Add background segments (class 0) for frames with no action
+        if frames and frame_indices:
+            max_frame_idx = len(frames) - 1
+            # Sort action segments by start time
+            sorted_segments = sorted(action_segments)
+            
+            # Find gaps between actions to create background segments
+            background_segments = []
+            last_end = 0
+            
+            for start, end in sorted_segments:
+                if start > last_end:
+                    # Gap found - add background segment
+                    background_segments.append((last_end, start))
+                last_end = max(last_end, end)
+                
+            # Add final background segment if needed
+            if last_end < max_frame_idx:
+                background_segments.append((last_end, max_frame_idx + 1))
+                
+            # Create annotations for background segments
+            for start, end in background_segments:
+                if end > start:
+                    bg_anno = {
+                        "action_id": 0,  # Background class is 0
+                        "start_frame": int(start),
+                        "end_frame": int(end),
+                        "start_time": float(frame_indices[start] / max(fps, 1e-6)) if start < len(frame_indices) else 0,
+                        "end_time": float(frame_indices[min(end-1, len(frame_indices)-1)] / max(fps, 1e-6)),
+                        "original_start": int(frame_indices[start]) if start < len(frame_indices) else 0,
+                        "original_end": int(frame_indices[min(end-1, len(frame_indices)-1)]),
+                    }
+                    action_annotations.append(bg_anno)
 
     except Exception as e:
          print(f"processing segments for {video_id}: {e}")

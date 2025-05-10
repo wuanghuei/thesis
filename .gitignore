@@ -1,4 +1,5 @@
 Data/
+data/
 logs/
 rnn_checkpoints/
 rnn_processed_data/
