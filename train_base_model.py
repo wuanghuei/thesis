@@ -23,18 +23,18 @@ def train(
     cfg,
     device, start_epoch=0, best_map=0
 ):
-    epochs = cfg['epochs']
+    epochs = cfg['base_model_training']['epochs']
     log_dir = Path(cfg['data']['logs'])
     checkpoint_dir = Path(cfg['data']['base_model_checkpoints'])
     best_checkpoint_path = checkpoint_dir / cfg['data']['base_best_checkpoint_name']
-    use_mixed_precision = cfg['use_mixed_precision']
-    gradient_accumulation_steps = cfg['gradient_accumulation_steps']
-    max_grad_norm = cfg['gradient_clipping']['max_norm']
-    warmup_epochs = cfg['warmup']['epochs']
-    base_lr = cfg['optimizer']['lr']
-    warmup_factor = cfg['warmup']['factor']
-    initial_loss_weights = cfg['loss']
-    debug_detection_enabled = cfg['debugging']['debug_detection_enabled']
+    use_mixed_precision = cfg['base_model_training']['use_mixed_precision']
+    gradient_accumulation_steps = cfg['base_model_training']['gradient_accumulation_steps']
+    max_grad_norm = cfg['base_model_training']['gradient_clipping']['max_norm']
+    warmup_epochs = cfg['base_model_training']['warmup']['epochs']
+    base_lr = float(cfg['base_model_training']['optimizer']['lr'])
+    warmup_factor = float(cfg['base_model_training']['warmup']['factor'])
+    initial_loss_weights = cfg['base_model_training']['loss']
+    debug_detection_enabled = cfg['base_model_training']['debugging']['debug_detection_enabled']
     
     adjust_weights = True
     if adjust_weights:
@@ -321,8 +321,8 @@ def main():
 
     if opt_cfg['type'].lower() == 'adamw':
         optimizer = optim.AdamW(
-            model.parameters(), lr=opt_cfg['lr'], 
-            weight_decay=opt_cfg['weight_decay'], eps=opt_cfg['eps']
+            model.parameters(), lr=float(opt_cfg['lr']), 
+            weight_decay=float(opt_cfg['weight_decay']), eps=float(opt_cfg['eps'])
         )
     else:
         print(f"Unsupported optimizer type {opt_cfg['type']}")
