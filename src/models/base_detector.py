@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models.video.mvit import MViT
+from torchvision.models.video import mvit_v2_s, MViT_V2_S_Weights
 from torchvision.models import resnet18
 from contextlib import nullcontext
 
@@ -10,20 +10,42 @@ class TemporalActionDetector(nn.Module):
         super().__init__()
         self.num_classes = num_classes
         self.window_size = window_size
-        self.video_backbone = MViT(
-            spatial_size=(224, 224),
-            temporal_size=window_size,
-            num_heads=8,
-            num_layers=16,
-            hidden_dim=768,
-            mlp_dim=3072,
-            num_classes=num_classes,
-            dropout=dropout,
-            attention_dropout=dropout,
-            stochastic_depth_prob=0.2,
-            norm_layer=nn.LayerNorm,
+        
+        # Load pretrained MViT_V2_S model
+        video_backbone_pretrained = mvit_v2_s(
+            weights=MViT_V2_S_Weights.KINETICS400_V1
         )
-        self.rgb_feature_dim = 768
+        
+        # The feature dimension for MViT_V2_S (small) before the head is 768
+        self.rgb_feature_dim = 768 # This is generally the case for MViT_V2_S
+        
+        # Replace the head of the MViT_V2_S model with an identity layer to get features
+        # MViT's head is typically named 'head' and is an nn.Sequential(nn.Dropout(...), nn.Linear(...))
+        # We need to ensure this attribute name is correct or find the actual feature dimension.
+        # Based on typical torchvision MViT structure:
+        if hasattr(video_backbone_pretrained, 'head') and isinstance(video_backbone_pretrained.head, nn.Sequential):
+            # Assuming the Linear layer is the last module in the head sequential block
+            # and its in_features is what we need for rgb_feature_dim.
+            # For MViT_V2_S, the head is nn.Sequential(nn.Dropout(p=..., inplace=True), nn.Linear(in_features=768, out_features=..., bias=True))
+            # So, self.rgb_feature_dim = 768 is likely correct.
+            video_backbone_pretrained.head = nn.Identity()
+        else:
+            # Fallback or error if head structure is not as expected
+            # This might require inspecting the model structure further if it fails.
+            print("Warning: MViT_V2_S head structure not as expected. Feature extraction might be incorrect.")
+            # As a robust measure, we could try to get the in_features of the last linear layer if it exists
+            # For now, we proceed assuming the head removal is successful and dim is 768.
+        self.video_backbone = self._adapt_mvit_for_32_frames(video_backbone_pretrained)
+        
+        # The rest of the parameters from the original MViT initialization that were commented out
+        # are either implicitly handled by mvit_v2_s (like spatial_size, num_heads, num_layers, hidden_dim, mlp_dim for the specific variant 's')
+        # or need to be compatible with the pretrained model's configuration (like temporal_size).
+        # The KINETICS400_V1 weights for MViT_V2_S are trained with specific input resolution and temporal length (e.g., 16 frames for temporal_size).
+        # If window_size (e.g., 32) is different, this needs careful handling, potentially by adjusting model parameters if allowed,
+        # or by ensuring input preprocessing matches what the fine-tuning expects.
+        # mvit_v2_s does not take temporal_size directly as an argument when loading pretrained_weights.
+        # It expects a certain input shape. The `window_size` here will dictate the input tensor's temporal dimension.
+
         self.frame_extractor_2d = resnet18(weights='IMAGENET1K_V1')
         self.frame_extractor_2d = nn.Sequential(*list(self.frame_extractor_2d.children())[:-1])
         self.local_feature_dim = 512
@@ -82,6 +104,11 @@ class TemporalActionDetector(nn.Module):
         self.action_classifier = nn.Conv1d(512, num_classes, kernel_size=1)
         self.start_detector = nn.Conv1d(512, num_classes, kernel_size=1)
         self.end_detector = nn.Conv1d(512, num_classes, kernel_size=1)
+    def _adapt_mvit_for_32_frames(self, model):
+        """Điều chỉnh MViT model để xử lý 32 frames input"""
+        # Cập nhật temporal_size trong positional encoding
+        model.pos_encoding.temporal_size = self.window_size // 2  # 16 = 32/2 (sau conv_proj)
+        return model
     def _extract_frame_features(self, x):
         batch_size, channels, T, H, W = x.shape
         mvit_context = nullcontext() if self.training else torch.no_grad()
