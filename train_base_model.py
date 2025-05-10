@@ -80,10 +80,10 @@ def train(
         
         for batch_idx, batch in enumerate(progress_bar):
             try:
-                frames, pose_data, _, action_masks, start_masks, end_masks, _ = batch
+                frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
             except ValueError:
                  print("Batch structure mismatch Trying simplified unpack (frames, pose, masks..., meta) Check dataloader")
-                 try: frames, pose_data, action_masks, start_masks, end_masks, _ = batch
+                 try: frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
                  except ValueError: print("Cannot determine batch structure, exiting"); exit()
             
             frames = frames.to(device)
@@ -205,7 +205,7 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
             try:
-                 frames, pose_data, _, action_masks, start_masks, end_masks, metadata = batch
+                 frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
             except ValueError:
                  print("Batch structure mismatch in validation Check dataloader")
                  try: frames, pose_data, action_masks, start_masks, end_masks, metadata = batch
