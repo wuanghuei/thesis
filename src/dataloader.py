@@ -3,14 +3,12 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import json
 from pathlib import Path
-import src.utils.feature_extraction as feature_extraction
 import src.utils.helpers as helpers
 
 class FullVideoDataset(Dataset):
-    def __init__(self, frames_dir, anno_dir, pose_dir, num_classes, window_size, mode='train'):
+    def __init__(self, frames_dir, anno_dir, num_classes, window_size, mode='train'):
         self.frames_dir = Path(frames_dir)
         self.anno_dir = Path(anno_dir)
-        self.pose_dir = Path(pose_dir)
         self.num_classes = num_classes
         self.window_size = window_size
         self.mode = mode
@@ -23,15 +21,11 @@ class FullVideoDataset(Dataset):
             if fname.endswith("_frames.npz"):
                 video_id = fname.replace("_frames.npz", "")
                 anno_path = self.anno_dir / f"{video_id}_annotations.json"
-                pose_path = self.pose_dir / f"{video_id}_pose.npz"
                 
-                if anno_path.exists() and pose_path.exists():
+                if anno_path.exists():
                     video_ids.append(video_id)
                 else:
-                    missing = []
-                    if not anno_path.exists(): missing.append("annotations")
-                    if not pose_path.exists(): missing.append("pose")
-                    print(f"Skipping {video_id} - missing {', '.join(missing)}")
+                    print(f"Skipping {video_id} - missing annotations")
         
         for video_id in video_ids:
             self._process_video(video_id)
@@ -104,10 +98,6 @@ class FullVideoDataset(Dataset):
         npz_data = np.load(frames_path)
         all_frames = npz_data['frames']
         
-        pose_path = self.pose_dir / f"{video_id}_pose.npz"
-        pose_npz = np.load(pose_path)
-        all_pose = pose_npz['pose']
-        
         if end_idx <= all_frames.shape[0]:
             frames = all_frames[start_idx:end_idx]
         else:
@@ -117,31 +107,12 @@ class FullVideoDataset(Dataset):
             if actual_frames.shape[0] > 0:
                 frames[actual_frames.shape[0]:] = actual_frames[-1]
         
-        if end_idx <= all_pose.shape[0]:
-            pose_data = all_pose[start_idx:end_idx]
-        else:
-            pose_data = np.zeros((self.window_size, all_pose.shape[1]), dtype=all_pose.dtype)
-            actual_pose = all_pose[start_idx:end_idx]
-            pose_data[:actual_pose.shape[0]] = actual_pose
-            if actual_pose.shape[0] > 0:
-                pose_data[actual_pose.shape[0]:] = actual_pose[-1]
-        
-        velocity_data = feature_extraction.compute_velocity(pose_data)
-        
-        pose_with_velocity = np.concatenate([pose_data, velocity_data], axis=1)
-                
         frames = torch.from_numpy(frames).float() / 255.0 
         frames = frames.permute(3, 0, 1, 2)
         
-        pose_with_velocity = torch.from_numpy(pose_with_velocity).float()
-        
-
         action_masks = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
-        
-
         start_mask = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
         end_mask = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
-
 
         for anno in annotations:
             action_id = anno["action_id"]
@@ -161,21 +132,18 @@ class FullVideoDataset(Dataset):
             "end_idx": end_idx,
             "annotations": annotations,
         }
-
         
-        return frames, pose_with_velocity,action_masks, start_mask, end_mask, metadata
+        return frames, action_masks, start_mask, end_mask, metadata
 
 def custom_collate_fn(batch):
-
-    frames, pose_data, action_masks, start_masks, end_masks, metadata = zip(*batch)
+    frames, action_masks, start_masks, end_masks, metadata = zip(*batch)
     
     frames = torch.stack(frames)
-    pose_data = torch.stack(pose_data)
     action_masks = torch.stack(action_masks)
     start_masks = torch.stack(start_masks)
     end_masks = torch.stack(end_masks)
     
-    return frames, pose_data, action_masks, start_masks, end_masks, metadata
+    return frames, action_masks, start_masks, end_masks, metadata
 
 def get_train_loader(cfg, shuffle=True):
     data_cfg = cfg.get('data', {})
@@ -184,7 +152,6 @@ def get_train_loader(cfg, shuffle=True):
 
     frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/frames'
     anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/annotations'
-    pose_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/pose'
     num_classes = global_cfg.get('num_classes', 5)
     window_size = global_cfg.get('window_size', 32)
     batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
@@ -193,7 +160,6 @@ def get_train_loader(cfg, shuffle=True):
     dataset = FullVideoDataset(
         frames_dir,
         anno_dir,
-        pose_dir,
         num_classes=num_classes,
         window_size=window_size,
         mode='train'
@@ -213,7 +179,6 @@ def get_val_loader(cfg, shuffle=False):
 
     frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/frames'
     anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/annotations'
-    pose_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/pose'
     num_classes = global_cfg.get('num_classes', 5)
     window_size = global_cfg.get('window_size', 32)
     val_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
@@ -222,7 +187,6 @@ def get_val_loader(cfg, shuffle=False):
     dataset = FullVideoDataset(
         frames_dir,
         anno_dir,
-        pose_dir,
         num_classes=num_classes,
         window_size=window_size,
         mode='val'
@@ -242,7 +206,6 @@ def get_test_loader(cfg, shuffle=False):
 
     frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/frames'
     anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/annotations'
-    pose_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/pose'
     num_classes = global_cfg.get('num_classes', 5)
     window_size = global_cfg.get('window_size', 32)
     test_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
@@ -251,7 +214,6 @@ def get_test_loader(cfg, shuffle=False):
     dataset = FullVideoDataset(
         frames_dir,
         anno_dir,
-        pose_dir,
         num_classes=num_classes,
         window_size=window_size,
         mode='test'
