@@ -72,8 +72,6 @@ base_model_training:
     min_segment_length: 3 
   evaluation: 
     run_final_evaluation_on_test: True
-  debugging:
-    debug_detection_enabled: True # Enable this to get debug stats
   dataloader:
     num_workers: 4
     batch_size: 1

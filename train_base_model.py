@@ -12,7 +12,6 @@ import argparse
 import src.models.base_detector as base_detector
 import src.dataloader as dataloader
 import src.utils.helpers as helpers
-import src.utils.debugging as debugging
 import src.losses as losses
 import src.evaluation as evaluation
 import src.utils.postprocessing as postprocessing
@@ -34,7 +33,6 @@ def train(
     base_lr = float(cfg['base_model_training']['optimizer']['lr'])
     warmup_factor = float(cfg['base_model_training']['warmup']['factor'])
     initial_loss_weights = cfg['base_model_training']['loss']
-    debug_detection_enabled = cfg['base_model_training']['debugging']['debug_detection_enabled']
     
     adjust_weights = True
     if adjust_weights:
@@ -243,10 +241,6 @@ def evaluate(model, val_loader, criterion, device, eval_cfg, num_classes, use_mi
                 boundary_threshold=boundary_threshold,
                 nms_threshold=nms_threshold
                 )
-
-                 
-            if eval_cfg['debugging']['debug_detection_enabled']:
-                debugging.debug_detection_stats(batch_detections, frames.shape[0], metadata)
             
             
             all_window_detections.extend(batch_detections)
