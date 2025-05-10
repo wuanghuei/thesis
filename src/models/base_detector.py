@@ -79,7 +79,6 @@ class TemporalActionDetector(nn.Module):
         self.start_detector = nn.Conv1d(512, num_classes, kernel_size=1)
         self.end_detector = nn.Conv1d(512, num_classes, kernel_size=1)
     def _adapt_mvit_for_32_frames(self, model):
-        """Điều chỉnh MViT model để xử lý 32 frames input"""
         model.pos_encoding.temporal_size = self.window_size // 2
         return model
     def _extract_frame_features(self, x):
