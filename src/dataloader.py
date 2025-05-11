@@ -44,7 +44,7 @@ class FullVideoDataset(Dataset):
             self._add_window(video_id, 0, num_frames, annotations)
             return
             
-        stride = self.window_size // 2 
+        stride = 8
         
         for start in range(0, num_frames - self.window_size + 1, stride):
             end = start + self.window_size
@@ -118,10 +118,14 @@ class FullVideoDataset(Dataset):
             action_id = anno["action_id"]
             s, e = anno["start_frame"], anno["end_frame"]
             
-            action_masks[action_id, s:e] = 1.0
-            
-            start_mask[action_id] += helpers.gaussian_kernel(s, self.window_size, sigma=2.0)
-            end_mask[action_id] += helpers.gaussian_kernel(e-1, self.window_size, sigma=2.0)
+            # Ensure action_id is within bounds of our tensor dimensions
+            if action_id < self.num_classes:
+                action_masks[action_id, s:e] = 1.0
+                
+                start_mask[action_id] += helpers.gaussian_kernel(s, self.window_size, sigma=2.0)
+                end_mask[action_id] += helpers.gaussian_kernel(e-1, self.window_size, sigma=2.0)
+            else:
+                print(f"Warning: action_id {action_id} exceeds num_classes {self.num_classes}")
             
         start_mask = torch.clamp(start_mask, 0, 1)
         end_mask = torch.clamp(end_mask, 0, 1)
@@ -152,7 +156,7 @@ def get_train_loader(cfg, shuffle=True):
 
     frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/frames'
     anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/annotations'
-    num_classes = global_cfg.get('num_classes', 5)
+    num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
     window_size = global_cfg.get('window_size', 32)
     batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
     num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
@@ -179,7 +183,7 @@ def get_val_loader(cfg, shuffle=False):
 
     frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/frames'
     anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/annotations'
-    num_classes = global_cfg.get('num_classes', 5)
+    num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
     window_size = global_cfg.get('window_size', 32)
     val_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
     num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
@@ -206,7 +210,7 @@ def get_test_loader(cfg, shuffle=False):
 
     frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/frames'
     anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/annotations'
-    num_classes = global_cfg.get('num_classes', 5)
+    num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
     window_size = global_cfg.get('window_size', 32)
     test_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
     num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
