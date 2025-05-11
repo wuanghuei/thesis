@@ -4,6 +4,7 @@ logs/
 rnn_checkpoints/
 rnn_processed_data/
 checkpoints/
+features/
 __pycache__/
 *.pyc
 *.pyo
