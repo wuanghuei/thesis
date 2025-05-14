@@ -11,6 +11,7 @@ import pandas as pd
 
 # Import feature extractor
 from src.models.feature_extractor.mvit_32 import MViT32FeatureExtractor
+from src.models.feature_extractor.mvit_16 import MViT16FeatureExtractor
 
 def extract_features_for_video(video_id, frames_dir, anno_dir, feature_extractor, device, window_size=32, stride=8):
     """
@@ -120,7 +121,7 @@ def extract_features_for_video(video_id, frames_dir, anno_dir, feature_extractor
         "metadata": annotations
     }
 
-def extract_features_for_split(split, base_dir, output_dir, device=None):
+def extract_features_for_split(split, base_dir, output_dir, device=None, model_name="mvit_32"):
     """
     Extract features for all videos in a split
     
@@ -151,7 +152,10 @@ def extract_features_for_split(split, base_dir, output_dir, device=None):
         device = torch.device(device)
     
     # Initialize feature extractor
-    feature_extractor = MViT32FeatureExtractor(device=device)
+    if model_name == "mvit_32":
+        feature_extractor = MViT32FeatureExtractor(device=device)
+    elif model_name == "mvit_16":
+        feature_extractor = MViT16FeatureExtractor(device=device)
     feature_extractor.eval()
     print(f"Using device: {device}")
     
@@ -182,9 +186,14 @@ def extract_features_for_split(split, base_dir, output_dir, device=None):
     
     for video_id in tqdm(video_ids, desc=f"Processing {split} videos"):
         # Extract features
-        result = extract_features_for_video(
-            video_id, frames_dir, anno_dir, feature_extractor, device
-        )
+        if model_name == "mvit_32":
+            result = extract_features_for_video(
+                video_id, frames_dir, anno_dir, feature_extractor, device, window_size=32, stride=8
+            )
+        elif model_name == "mvit_16":
+            result = extract_features_for_video(
+                video_id, frames_dir, anno_dir, feature_extractor, device, window_size=16, stride=4
+            )
         
         if result is None:
             failed_videos += 1
@@ -216,22 +225,26 @@ def extract_features_for_split(split, base_dir, output_dir, device=None):
 def main():
     parser = argparse.ArgumentParser(description="Extract features from videos directly")
     
-    parser.add_argument("--base_dir", type=str, default="Data/full_videos",
+    parser.add_argument("--base_dir", type=str, default="data/full_videos",
                        help="Base directory containing dataset")
-    parser.add_argument("--output_dir", type=str, default="features",
+    parser.add_argument("--output_dir", type=str, default="data/features",
                        help="Output directory for features")
     parser.add_argument("--split", type=str, choices=["train", "val", "test", "all"], default="all",
                        help="Which data split to process")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"],
                        help="Device to run model on (cuda or cpu)")
-    
+    parser.add_argument("--model_name", type=str, default="mvit_16", choices=["mvit_32", "mvit_16"],
+                       help="Model name to use for feature extraction")
     args = parser.parse_args()
     
     # Process specified splits
     splits_to_process = ["train", "val", "test"] if args.split == "all" else [args.split]
     
     # Create output directory
-    output_dir = Path(args.output_dir)
+    if args.model_name == "mvit_32":
+        output_dir = Path(args.output_dir) / "mvit_32"
+    elif args.model_name == "mvit_16":
+        output_dir = Path(args.output_dir) / "mvit_16"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Track split directories
@@ -240,7 +253,7 @@ def main():
     # Process each split
     for split in splits_to_process:
         print(f"\nProcessing {split} split...")
-        split_dir = extract_features_for_split(split, args.base_dir, output_dir, args.device)
+        split_dir = extract_features_for_split(split, args.base_dir, output_dir, args.device, args.model_name)
         split_dirs[split] = str(split_dir)
     
     # Save info about splits

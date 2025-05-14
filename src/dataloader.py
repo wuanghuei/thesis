@@ -5,168 +5,204 @@ import json
 from pathlib import Path
 import src.utils.helpers as helpers
 
-class FullVideoDataset(Dataset):
-    def __init__(self, frames_dir, anno_dir, num_classes, window_size, mode='train'):
-        self.frames_dir = Path(frames_dir)
+class FeatureDataset(Dataset):
+    def __init__(self, features_dir, anno_dir, num_classes, mode='train', max_seq_len=600, stride=8, window_size=16):
+        self.features_dir = Path(features_dir)
         self.anno_dir = Path(anno_dir)
         self.num_classes = num_classes
-        self.window_size = window_size
         self.mode = mode
         self.samples = []
+        self.max_seq_len = max_seq_len
+        self.stride = stride
+        self.window_size = window_size
+        self.background_class_idx = 0
+        self.ignore_index = -100
 
-        video_ids = []
-        frame_files = [f.name for f in self.frames_dir.iterdir()] if self.frames_dir.exists() else []
+        # Get all feature files
+        feature_files = [f for f in self.features_dir.iterdir() if f.name.endswith('_features.npz')]
         
-        for fname in frame_files:
-            if fname.endswith("_frames.npz"):
-                video_id = fname.replace("_frames.npz", "")
-                anno_path = self.anno_dir / f"{video_id}_annotations.json"
+        for feature_file in feature_files:
+            video_id = feature_file.name.replace('_features.npz', '')
+            anno_path = self.anno_dir / f"{video_id}_annotations.json"
+            
+            if anno_path.exists():
+                self._process_video(video_id)
+            else:
+                print(f"Skipping {video_id} - missing annotations")
                 
-                if anno_path.exists():
-                    video_ids.append(video_id)
-                else:
-                    print(f"Skipping {video_id} - missing annotations")
-        
-        for video_id in video_ids:
-            self._process_video(video_id)
-                
-        print(f"[{mode}] Loaded {len(self.samples)} sliding windows from {len(video_ids)} videos")
+        print(f"[{mode}] Loaded {len(self.samples)} samples from {len(feature_files)} videos")
         
     def _process_video(self, video_id):
+        # Load annotations
         anno_path = self.anno_dir / f"{video_id}_annotations.json"
         with open(anno_path, 'r') as f:
             anno = json.load(f)
+            
+        # Load features
+        feature_path = self.features_dir / f"{video_id}_features.npz"
+        features = np.load(feature_path)
+        clip_features = features['clip_features']  # Shape: [num_frames, feature_dim]
         
-        num_frames = anno["num_frames"]
-        annotations = anno["annotations"]
-        
-        if num_frames < self.window_size:
-            self._add_window(video_id, 0, num_frames, annotations)
-            return
-            
-        stride = 8
-        
-        for start in range(0, num_frames - self.window_size + 1, stride):
-            end = start + self.window_size
-            self._add_window(video_id, start, end, annotations)
-            
-        if (num_frames - self.window_size) % stride != 0:
-            start = num_frames - self.window_size
-            end = num_frames
-            self._add_window(video_id, start, end, annotations)
-            
-    def _add_window(self, video_id, start_idx, end_idx, all_annotations):
-        window_annos = []
-        
-        for anno in all_annotations:
-            action_start = anno["start_frame"]
-            action_end = anno["end_frame"]
-            
-            if action_end < start_idx or action_start >= end_idx:
-                continue  # No overlap
-                
-            rel_start = max(0, action_start - start_idx)
-            rel_end = min(end_idx - start_idx, action_end - start_idx)
-            
-            if rel_end > rel_start:
-                window_annos.append({
-                    "action_id": anno["action_id"],
-                    "start_frame": rel_start,
-                    "end_frame": rel_end,
-                    "original_start": anno["original_start"],
-                    "original_end": anno["original_end"]
-                })
-
+        # Create sample
         self.samples.append({
-            "video_id": video_id,
-            "start_idx": start_idx,
-            "end_idx": end_idx,
-            "annotations": window_annos
-            })
+            'video_id': video_id,
+            'features': clip_features,
+            'annotations': anno
+        })
+
+    def _compute_iou(self, window_start, window_end, action_start, action_end):
+        # window_end và action_end là frame CUỐI CÙNG CÓ trong đoạn
+        intersection_start = max(window_start, action_start)
+        intersection_end = min(window_end, action_end)
+
+        if intersection_end < intersection_start: # Không có overlap
+            return 0.0
+
+        intersection_length = intersection_end - intersection_start + 1
+        window_length = window_end - window_start + 1
+        action_length = action_end - action_start + 1
+        union_length = window_length + action_length - intersection_length
+
+        return intersection_length / union_length if union_length > 0 else 0.0
+
+    def _get_window_center(self, token_idx):
+        """Get the center frame of the window represented by this token."""
+        window_start = token_idx * self.stride
+        window_end = window_start + self.window_size - 1
+        return (window_start + window_end) / 2
 
     def __len__(self):
         return len(self.samples)
-
+        
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        video_id = sample["video_id"]
-        start_idx = sample["start_idx"]
-        end_idx = sample["end_idx"]
-        annotations = sample["annotations"]
+        features = sample['features']  # [T_video, D_backbone]
+        annotations = sample['annotations']
         
-        frames_path = self.frames_dir / f"{video_id}_frames.npz"
-        npz_data = np.load(frames_path)
-        all_frames = npz_data['frames']
+        # Convert features to tensor
+        features = torch.from_numpy(features).float()
+        T_video = features.shape[0]
         
-        if end_idx <= all_frames.shape[0]:
-            frames = all_frames[start_idx:end_idx]
-        else:
-            frames = np.zeros((self.window_size, *all_frames.shape[1:]), dtype=all_frames.dtype)
-            actual_frames = all_frames[start_idx:end_idx]
-            frames[:actual_frames.shape[0]] = actual_frames
-            if actual_frames.shape[0] > 0:
-                frames[actual_frames.shape[0]:] = actual_frames[-1]
+        # Initialize ground truth tensors
+        gt_classes = torch.full((self.max_seq_len,), self.ignore_index, dtype=torch.long)
+        gt_offsets = torch.zeros((self.max_seq_len, 2), dtype=torch.float)
+        offset_loss_mask = torch.zeros(self.max_seq_len, dtype=torch.bool)
+        gt_actionness = torch.zeros(self.max_seq_len, dtype=torch.float)
+        attention_padding_mask = torch.ones(self.max_seq_len, dtype=torch.bool)
         
-        frames = torch.from_numpy(frames).float() / 255.0 
-        frames = frames.permute(3, 0, 1, 2)
+        # Set padding mask for actual data
+        attention_padding_mask[:T_video] = False
         
-        action_masks = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
-        start_mask = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
-        end_mask = torch.zeros((self.num_classes, self.window_size), dtype=torch.float32)
-
-        for anno in annotations:
-            action_id = anno["action_id"]
-            s, e = anno["start_frame"], anno["end_frame"]
-            
-            # Ensure action_id is within bounds of our tensor dimensions
-            if action_id < self.num_classes:
-                action_masks[action_id, s:e] = 1.0
+        # Process each token
+        for token_idx in range(min(T_video, self.max_seq_len)):
+            window_start = token_idx * self.stride
+            window_end = window_start + self.window_size - 1
+            window_center = self._get_window_center(token_idx)
+            # Find overlapping actions
+            overlapping_actions = []
+            for anno in annotations['annotations']:
+                action_start = anno['start_frame']
+                action_end = anno['end_frame']
+                action_class = anno['action_id']
                 
-                start_mask[action_id] += helpers.gaussian_kernel(s, self.window_size, sigma=2.0)
-                end_mask[action_id] += helpers.gaussian_kernel(e-1, self.window_size, sigma=2.0)
-            else:
-                print(f"Warning: action_id {action_id} exceeds num_classes {self.num_classes}")
+                iou = self._compute_iou(window_start, window_end, action_start, action_end)
+                if iou > 0.1:  # Significant overlap threshold
+                    overlapping_actions.append({
+                        'class': action_class,
+                        'start': action_start,
+                        'end': action_end,
+                        'iou': iou,
+                        'center_dist': abs((action_start + action_end) / 2 - window_center)
+                    })
             
-        start_mask = torch.clamp(start_mask, 0, 1)
-        end_mask = torch.clamp(end_mask, 0, 1)
+            if not overlapping_actions:
+                # No significant overlap - background
+                gt_classes[token_idx] = self.background_class_idx
+                gt_actionness[token_idx] = 0.0
+                offset_loss_mask[token_idx] = False
+            elif len(overlapping_actions) == 1:
+                # Single action overlap - clear case
+                action = overlapping_actions[0]
+                gt_classes[token_idx] = action['class']
+                gt_actionness[token_idx] = 1.0
+                
+                # Compute target offsets
+                d_left = max(0, window_center - action['start'])
+                d_right = max(0, action['end'] - window_center)
+                gt_offsets[token_idx] = torch.tensor([d_left, d_right])
+                offset_loss_mask[token_idx] = True
+            else:
+                # Multiple actions - ambiguous case
+                # Choose action with highest IoU
+                best_action = max(overlapping_actions, key=lambda x: x['iou'])
+                gt_classes[token_idx] = best_action['class']
+                gt_actionness[token_idx] = 1.0
+                offset_loss_mask[token_idx] = False  # Don't train offsets for ambiguous cases
+        if T_video < self.max_seq_len:
+            # Chỉ gán ignore_index cho các token thực sự là padding
+            # Những token < T_video đã được gán là action hoặc background thật sự rồi
+            gt_classes[T_video:] = self.ignore_index
+        # Pad features to max_seq_len
+        padded_features = torch.zeros((self.max_seq_len, features.shape[1]), dtype=features.dtype)
+        padded_features[:T_video] = features[:self.max_seq_len]
         
-        metadata = {
-            "video_id": video_id,
-            "start_idx": start_idx,
-            "end_idx": end_idx,
-            "annotations": annotations,
+        return {
+            'feature_sequence': padded_features,         # [max_seq_len, D_backbone]
+            'gt_classes': gt_classes,                    # [max_seq_len]
+            'gt_offsets': gt_offsets,                    # [max_seq_len, 2]
+            'offset_loss_mask': offset_loss_mask,        # [max_seq_len]
+            'gt_actionness': gt_actionness,              # [max_seq_len]
+            'attention_padding_mask': attention_padding_mask,  # [max_seq_len]
+            'metadata': {
+                'video_id': sample['video_id'],
+                'num_frames': annotations['num_frames']
+            }
         }
-        
-        return frames, action_masks, start_mask, end_mask, metadata
 
 def custom_collate_fn(batch):
-    frames, action_masks, start_masks, end_masks, metadata = zip(*batch)
+    # Stack all tensors
+    feature_sequences = torch.stack([item['feature_sequence'] for item in batch])
+    gt_classes = torch.stack([item['gt_classes'] for item in batch])
+    gt_offsets = torch.stack([item['gt_offsets'] for item in batch])
+    offset_loss_masks = torch.stack([item['offset_loss_mask'] for item in batch])
+    gt_actionness = torch.stack([item['gt_actionness'] for item in batch])
+    attention_padding_masks = torch.stack([item['attention_padding_mask'] for item in batch])
     
-    frames = torch.stack(frames)
-    action_masks = torch.stack(action_masks)
-    start_masks = torch.stack(start_masks)
-    end_masks = torch.stack(end_masks)
+    # Collect metadata
+    metadata = [item['metadata'] for item in batch]
     
-    return frames, action_masks, start_masks, end_masks, metadata
+    return {
+        'feature_sequence': feature_sequences,      # [batch_size, max_seq_len, D_backbone]
+        'gt_classes': gt_classes,                   # [batch_size, max_seq_len]
+        'gt_offsets': gt_offsets,                   # [batch_size, max_seq_len, 2]
+        'offset_loss_mask': offset_loss_masks,      # [batch_size, max_seq_len]
+        'gt_actionness': gt_actionness,             # [batch_size, max_seq_len]
+        'attention_padding_mask': attention_padding_masks,  # [batch_size, max_seq_len]
+        'metadata': metadata
+    }
 
 def get_train_loader(cfg, shuffle=True):
     data_cfg = cfg.get('data', {})
     train_cfg = cfg.get('base_model_training', {})
     global_cfg = cfg.get('global', {})
 
-    frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/frames'
-    anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/train/annotations'
+    features_dir = Path(data_cfg.get('base_dir', 'data')) / 'features/train'
+    anno_dir = Path(data_cfg.get('base_dir', 'data')) / 'full_videos/train/annotations'
     num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
-    window_size = global_cfg.get('window_size', 32)
     batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
     num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
+    max_seq_len = global_cfg.get('max_seq_len', 600)
+    stride = global_cfg.get('stride', 8)
+    window_size = global_cfg.get('window_size', 16)
 
-    dataset = FullVideoDataset(
-        frames_dir,
+    dataset = FeatureDataset(
+        features_dir,
         anno_dir,
         num_classes=num_classes,
-        window_size=window_size,
-        mode='train'
+        mode='train',
+        max_seq_len=max_seq_len,
+        stride=stride,
+        window_size=window_size
     )
     return DataLoader(
         dataset,
@@ -181,23 +217,27 @@ def get_val_loader(cfg, shuffle=False):
     train_cfg = cfg.get('base_model_training', {})
     global_cfg = cfg.get('global', {})
 
-    frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/frames'
-    anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/val/annotations'
+    features_dir = Path(data_cfg.get('base_dir', 'data')) / 'features/val'
+    anno_dir = Path(data_cfg.get('base_dir', 'data')) / 'full_videos/val/annotations'
     num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
-    window_size = global_cfg.get('window_size', 32)
-    val_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
+    batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
     num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
+    max_seq_len = global_cfg.get('max_seq_len', 600)
+    stride = global_cfg.get('stride', 8)
+    window_size = global_cfg.get('window_size', 16)
 
-    dataset = FullVideoDataset(
-        frames_dir,
+    dataset = FeatureDataset(
+        features_dir,
         anno_dir,
         num_classes=num_classes,
-        window_size=window_size,
-        mode='val'
+        mode='val',
+        max_seq_len=max_seq_len,
+        stride=stride,
+        window_size=window_size
     )
     return DataLoader(
         dataset,
-        batch_size=val_batch_size,
+        batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=custom_collate_fn
@@ -208,23 +248,27 @@ def get_test_loader(cfg, shuffle=False):
     train_cfg = cfg.get('base_model_training', {})
     global_cfg = cfg.get('global', {})
 
-    frames_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/frames'
-    anno_dir = Path(data_cfg.get('base_dir', 'Data')) / 'full_videos/test/annotations'
+    features_dir = Path(data_cfg.get('base_dir', 'data')) / 'features/test'
+    anno_dir = Path(data_cfg.get('base_dir', 'data')) / 'full_videos/test/annotations'
     num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
-    window_size = global_cfg.get('window_size', 32)
-    test_batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
+    batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
     num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
+    max_seq_len = global_cfg.get('max_seq_len', 600)
+    stride = global_cfg.get('stride', 8)
+    window_size = global_cfg.get('window_size', 16)
 
-    dataset = FullVideoDataset(
-        frames_dir,
+    dataset = FeatureDataset(
+        features_dir,
         anno_dir,
         num_classes=num_classes,
-        window_size=window_size,
-        mode='test'
+        mode='test',
+        max_seq_len=max_seq_len,
+        stride=stride,
+        window_size=window_size
     )
     return DataLoader(
         dataset,
-        batch_size=test_batch_size,
+        batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
         collate_fn=custom_collate_fn
