@@ -1,6 +1,6 @@
 from collections import defaultdict
 import torch
-from src.utils.helpers import calculate_temporal_iou
+import src.utils.helpers as helpers
 
 def resolve_cross_class_overlaps(merged_detections):
     for video_id, detections in merged_detections.items():
@@ -34,22 +34,38 @@ def resolve_cross_class_overlaps(merged_detections):
 def merge_cross_window_detections(all_window_detections, all_window_metadata, iou_threshold=0.2, confidence_threshold=0.15):
     video_detections = defaultdict(lambda: defaultdict(list))
     
-    for window_idx, (window_dets, meta) in enumerate(zip(all_window_detections, all_window_metadata)):
-        video_id = meta['video_id']
-        start_idx = meta['start_idx']
-        
-        for det in window_dets:
-            action_id = det['action_id']
-            global_start = start_idx + det['start_frame']
-            global_end = start_idx + det['end_frame']
-            confidence = det['confidence']
+    global_window_idx = 0
+    for batch_idx, (batch_detections, batch_meta_tuple) in enumerate(zip(all_window_detections, all_window_metadata)):
+        if len(batch_detections) != len(batch_meta_tuple):
+            print(f"Warning: Mismatch between detections ({len(batch_detections)}) and metadata ({len(batch_meta_tuple)}) in batch {batch_idx}. Skipping batch.")
+            continue
             
-            video_detections[video_id][action_id].append({
-                'start_frame': global_start,
-                'end_frame': global_end,
-                'confidence': confidence,
-                'window_idx': window_idx
-            })
+        for window_dets_in_batch, meta in zip(batch_detections, batch_meta_tuple):
+            try:
+                video_id = meta['video_id']
+                start_idx = meta['start_idx']
+            except (TypeError, KeyError) as e:
+                 print(f"Warning: Invalid metadata format or missing key in batch {batch_idx}: {meta}. Error: {e}. Skipping window.")
+                 global_window_idx += 1
+                 continue
+
+            for det in window_dets_in_batch: 
+                try:
+                    action_id = det['action_id']
+                    global_start = start_idx + det['start_frame']
+                    global_end = start_idx + det['end_frame']
+                    confidence = det['confidence']
+                    
+                    video_detections[video_id][action_id].append({
+                        'start_frame': global_start,
+                        'end_frame': global_end,
+                        'confidence': confidence,
+                        'window_idx': global_window_idx
+                    })
+                except (TypeError, KeyError) as e:
+                    print(f"Warning: Invalid detection format or missing key in batch {batch_idx}, window {global_window_idx}: {det}. Error: {e}. Skipping detection.")
+            
+            global_window_idx += 1
     
     merged_results = {}
     for video_id, action_dets in video_detections.items():
@@ -67,19 +83,32 @@ def merge_cross_window_detections(all_window_detections, all_window_metadata, io
                 while j < len(dets):
                     next_det = dets[j]
                     
-                    overlap = min(merged['end_frame'], next_det['end_frame']) - max(merged['start_frame'], next_det['start_frame'])
-                    overlap_ratio = overlap / min(merged['end_frame'] - merged['start_frame'], next_det['end_frame'] - next_det['start_frame'])
+                    current_len = max(1, merged['end_frame'] - merged['start_frame'])
+                    next_len = max(1, next_det['end_frame'] - next_det['start_frame'])
+                    
+                    overlap = max(0, min(merged['end_frame'], next_det['end_frame']) - max(merged['start_frame'], next_det['start_frame']))
+                    overlap_ratio = overlap / min(current_len, next_len) 
                     
                     time_diff = abs(next_det['start_frame'] - merged['end_frame'])
                     
                     if (overlap_ratio >= iou_threshold or time_diff <= 5) and \
-                       (merged['confidence'] + next_det['confidence']) / 2 >= confidence_threshold:
-                        merged['start_frame'] = min(merged['start_frame'], next_det['start_frame'])
-                        merged['end_frame'] = max(merged['end_frame'], next_det['end_frame'])
-                        merged['confidence'] = (merged['confidence'] * (merged['end_frame'] - merged['start_frame']) + 
-                                             next_det['confidence'] * (next_det['end_frame'] - next_det['start_frame'])) / \
-                                             ((merged['end_frame'] - merged['start_frame']) + 
-                                             (next_det['end_frame'] - next_det['start_frame']))
+                       ((merged['confidence'] + next_det['confidence']) / 2 >= confidence_threshold):
+                        
+                        new_start = min(merged['start_frame'], next_det['start_frame'])
+                        new_end = max(merged['end_frame'], next_det['end_frame'])
+                        
+                        total_len = current_len + next_len
+                        if total_len > 0:
+                           merged_confidence = (merged['confidence'] * current_len + next_det['confidence'] * next_len) / total_len
+                        else: 
+                           merged_confidence = (merged['confidence'] + next_det['confidence']) / 2
+                           
+                        merged['start_frame'] = new_start
+                        merged['end_frame'] = new_end
+                        merged['confidence'] = merged_confidence
+                        
+                        current_len = max(1, new_end - new_start)
+                        
                         dets.pop(j)
                     else:
                         j += 1
@@ -167,7 +196,7 @@ def nms(detections, threshold):
         
         detections = [
             d for d in detections if 
-            calculate_temporal_iou(
+            helpers.calculate_temporal_iou(
                 (current['start_frame'], current['end_frame']),
                 (d['start_frame'], d['end_frame'])
             ) <= threshold

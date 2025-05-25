@@ -69,6 +69,18 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
     except Exception as e:
         print(f" saving frames NPZ for {video_id}: {e}")
         return 0, 0, False
+    
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"Cannot open video file: {video_path}")
+        return 0, 0, False
+        
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    cap.release()
+    
+    frame_indices = [i for i in range(0, total_frames, subsample_factor)]
+    num_frames = len(frame_indices)
 
     action_annotations = []
     action_segments = []
@@ -107,46 +119,13 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
                     action_segments.append((sub_start, sub_end))
             if not frame_indices: break
 
-        # Add background segments (class 0) for frames with no action
-        if frames and frame_indices:
-            max_frame_idx = len(frames) - 1
-            # Sort action segments by start time
-            sorted_segments = sorted(action_segments)
-            
-            # Find gaps between actions to create background segments
-            background_segments = []
-            last_end = 0
-            
-            for start, end in sorted_segments:
-                if start > last_end:
-                    # Gap found - add background segment
-                    background_segments.append((last_end, start))
-                last_end = max(last_end, end)
-                
-            # Add final background segment if needed
-            if last_end < max_frame_idx:
-                background_segments.append((last_end, max_frame_idx + 1))
-                
-            # Create annotations for background segments
-            for start, end in background_segments:
-                if end > start:
-                    bg_anno = {
-                        "action_id": 0,  # Background class is 0
-                        "start_frame": int(start),
-                        "end_frame": int(end),
-                        "start_time": float(frame_indices[start] / max(fps, 1e-6)) if start < len(frame_indices) else 0,
-                        "end_time": float(frame_indices[min(end-1, len(frame_indices)-1)] / max(fps, 1e-6)),
-                        "original_start": int(frame_indices[start]) if start < len(frame_indices) else 0,
-                        "original_end": int(frame_indices[min(end-1, len(frame_indices)-1)]),
-                    }
-                    action_annotations.append(bg_anno)
 
     except Exception as e:
          print(f"processing segments for {video_id}: {e}")
 
     annotation_data = {
         "video_id": video_id,
-        "num_frames": int(len(frames)),
+        "num_frames": int(num_frames),
         "original_frames": int(total_frames),
         "fps": float(fps),
         "subsample_factor": int(subsample_factor),
@@ -161,9 +140,9 @@ def prepare_full_video(video_path, label_path, output_dir_split, frame_size, sub
             json.dump(annotation_data, f, indent=2)
     except Exception as e:
         print(f"saving annotation JSON for {video_id}: {e}")
-        return len(frames), len(action_annotations), False
+        return num_frames, len(action_annotations), False
 
-    return len(frames), len(action_annotations), True
+    return num_frames, len(action_annotations), True
 
 def process_split(split_name, video_dir, label_dir, output_dir_split, frame_size, subsample_factor):
     print(f"\nProcessing {split_name} split")

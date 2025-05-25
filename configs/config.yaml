@@ -6,6 +6,8 @@ global:
   seed: 42
   num_classes: 6
   window_size: 16 # Used by base model dataloader & training
+  stride: 4
+  max_seq_len: 700
   device: cuda
 
 # Data Paths
@@ -66,11 +68,6 @@ base_model_training:
     label_smoothing: 0.1
   gradient_clipping:
     max_norm: 7.0
-  postprocessing: # Heuristic thresholds for base model
-    boundary_threshold: 0.11
-    class_thresholds: [0.15, 0.15, 0.01, 0.08, 0.15]
-    nms_threshold: 0.4
-    min_segment_length: 3 
   evaluation: 
     run_final_evaluation_on_test: True
   dataloader:
@@ -88,7 +85,7 @@ rnn_data_generation:
 # RNN Model Training
 rnn_training:
   model:
-    type: lstm # 'lstm' or 'gru' but we use lstm because it performs better
+    type: lstm 
     hidden_size: 128
     num_layers: 2
     dropout_prob: 0.5
@@ -112,10 +109,14 @@ rnn_training:
 # Pipeline Evaluation
 pipeline_evaluation:
   rnn_checkpoint_to_use: rnn_checkpoints/best_rnn_model.pth
-  inference_results_pkl: test_inference_raw.pkl # Default to test pkl, adjust if evaluating validation
+  inference_results_pkl: test_inference_raw.pkl 
+  boundary_threshold: [0.2, 0.2, 0.08, 0.08, 0.2]  
+  class_thresholds: [0.5, 0.5, 0.12, 0.2, 0.4]
+  nms_threshold: 0.4
+  min_segment_length: 3 
   visualization:
-    enabled: False # Set to True and provide details below to generate visualization
-    video_id: null # Specify a video ID like 'subject1_session1_crop'
+    enabled: False 
+    video_id: null 
     frames_npz_template: data/full_videos/test/frames/{video_id}_frames.npz
     output_video_path: logs/visualization_{video_id}.mp4
     fps: 15 

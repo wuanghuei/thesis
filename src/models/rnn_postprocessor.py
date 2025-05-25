@@ -13,7 +13,6 @@ class RNNPostProcessor(nn.Module):
         self.num_directions = 2 if bidirectional else 1
 
         linear_input_size = hidden_size * self.num_directions
-
         if self.rnn_type == 'lstm':
             self.rnn = nn.LSTM(input_size,
                                hidden_size,
@@ -41,11 +40,8 @@ class RNNPostProcessor(nn.Module):
             lengths_cpu = lengths.cpu()
             x = pack_padded_sequence(x, lengths_cpu, batch_first=True, enforce_sorted=False)
 
-        if self.rnn_type == 'lstm':
-            packed_output, _ = self.rnn(x)
-        else:
-            packed_output, _ = self.rnn(x)
-            
+        packed_output, _ = self.rnn(x)
+        
         if lengths is not None:
             rnn_output, _ = pad_packed_sequence(packed_output, batch_first=True)
         else:

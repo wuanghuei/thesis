@@ -5,6 +5,7 @@ rnn_checkpoints/
 rnn_processed_data/
 checkpoints/
 features/
+results/
 __pycache__/
 *.pyc
 *.pyo

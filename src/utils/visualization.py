@@ -46,25 +46,21 @@ def visualize_rnn_predictions(video_id, frames_npz_path, output_video_path, fps,
 
 
     colors = [
-        (255, 0, 0),    # Class 0 - Red
-        (0, 255, 0),    # Class 1 - Lime
-        (0, 0, 255),    # Class 2 - Blue
-        (255, 255, 0),  # Class 3 - Yellow
-        (0, 255, 255),  # Class 4 - Cyan
-        (255, 0, 255),  # Background/Other - Magenta (Not used for drawing segments)
+        (255, 0, 0),
+        (0, 255, 0),
+        (0, 0, 255),
+        (255, 255, 0),
+        (0, 255, 255),
+        (255, 0, 255),
     ]
     gt_color = (200, 200, 200)
-    pred_color_base = (180, 105, 255)
 
     bar_height = 25
     gt_y_pos = 10
-    pred_y_pos = gt_y_pos + bar_height + 5
     text_y_offset = 18
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.5
     font_thickness = 1
-
-    rnn_preds_this_video = rnn_preds_by_video.get(video_id, defaultdict(list))
 
     for frame_idx in tqdm(range(num_frames), desc="Processing Frames"): 
         frame = frames[frame_idx].copy() 
@@ -75,8 +71,8 @@ def visualize_rnn_predictions(video_id, frames_npz_path, output_video_path, fps,
                 if start <= frame_idx < end:
                     label_text = f"GT Cls {action_id}"
                     gt_labels_on_frame.append((label_text, colors[action_id % len(colors)]))
-                    cv2.rectangle(frame, (0, gt_y_pos), (width-1, gt_y_pos + bar_height), gt_color, -1) # Background bar
-                    cv2.rectangle(frame, (0, gt_y_pos), (width-1, gt_y_pos + bar_height), colors[action_id % len(colors)], 2) # Border
+                    cv2.rectangle(frame, (0, gt_y_pos), (width-1, gt_y_pos + bar_height), gt_color, -1)
+                    cv2.rectangle(frame, (0, gt_y_pos), (width-1, gt_y_pos + bar_height), colors[action_id % len(colors)])
                     cv2.putText(frame, label_text, (5, gt_y_pos + text_y_offset), font, font_scale, (0,0,0), font_thickness, cv2.LINE_AA)
                     break 
 

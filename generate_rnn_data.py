@@ -9,7 +9,7 @@ from pathlib import Path
 import src.utils.helpers as helpers
 
 try:
-    import src.models.base_detector as base_detector
+    from src.models.TemporalActionDetector_v5_1 import TemporalActionDetector
 except ImportError:
     print("Could not import TemporalActionDetector from src models model_fixed Make sure the file exists")
     exit()
@@ -24,26 +24,25 @@ except ImportError:
     print("ActionDetectionLoss not found")
     exit()
 
-def run_inference(model, data_loader, device):
+def run_inference(model, data_loader, device, use_mixed_precision):
     model.eval()
     all_raw_preds = []
     all_batch_meta = []
-
-    print(f"Running inference on {len(data_loader.dataset)} samples")
+    
+    print(f"Running inference on {len(data_loader.dataset)} samples...")
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Model Inference"):
             try:
-                frames, pose_data, _, _, _, metadata = batch
+                 mvit_feat, resnet_feat, pose_feat, _, _, _, metadata = batch
             except ValueError:
-                 print("Batch structure mismatch Trying simplified unpack (frames, pose, meta) Check dataloader")
-                 try: frames, pose_data, metadata = batch
-                 except ValueError: print("Cannot determine batch structure Exiting"); exit()
+                print("Error: Batch structure mismatch in dataloader. Check dataloader output.")
 
-            frames = frames.to(device)
-            if pose_data is not None: pose_data = pose_data.to(device)
-
-            with torch.cuda.amp.autocast(enabled=True):
-                predictions = model(frames, pose_data)
+            mvit_feat = mvit_feat.to(device)
+            resnet_feat = resnet_feat.to(device)
+            if pose_feat is not None:
+                pose_feat = pose_feat.to(device)
+            with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+                predictions = model(mvit_feat, resnet_feat, pose_feat)
 
             action_probs = torch.sigmoid(predictions['action_scores']).cpu().detach()
             start_probs = torch.sigmoid(predictions['start_scores']).cpu().detach()
@@ -51,7 +50,7 @@ def run_inference(model, data_loader, device):
 
             all_raw_preds.append((action_probs, start_probs, end_probs))
             all_batch_meta.append(copy.deepcopy(metadata))
-
+            
     return all_raw_preds, all_batch_meta
 
 def main(cfg, args):
@@ -88,7 +87,7 @@ def main(cfg, args):
     print(f"Using device: {device}")
     print(f"Loading base model checkpoint: {checkpoint_path}")
 
-    model = base_detector.TemporalActionDetector(num_classes=num_classes, window_size=window_size)
+    model = TemporalActionDetector(num_classes=num_classes, window_size=window_size)
     model = model.to(device)
 
     if Path(checkpoint_path).exists():
@@ -108,6 +107,7 @@ def main(cfg, args):
         exit()
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}")
     print("Preparing Training Set Inference")
+
     train_loader = dataloader.get_train_loader(cfg)
     train_raw_preds, train_batch_meta = run_inference(model, train_loader, device)
     print(f"\nSaving training inference results to: {train_pkl_path}")

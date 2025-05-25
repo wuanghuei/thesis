@@ -8,6 +8,29 @@ from collections import defaultdict
 from tqdm import tqdm
 
 
+def labels_to_segments(labels, ignore_label=5):
+    segments = defaultdict(list)
+    current_action = -1
+    start_frame = -1
+    T = len(labels)
+    for t in range(T):
+        label = labels[t]
+        if label != ignore_label and label != current_action:
+            if current_action != -1 and start_frame != -1:
+                segments[current_action].append({'start_frame': start_frame, 'end_frame': t})
+            current_action = label
+            start_frame = t
+        elif (label == ignore_label or label != current_action) and current_action != -1:
+            segments[current_action].append({'start_frame': start_frame, 'end_frame': t})
+            current_action = -1
+            start_frame = -1
+            if label != ignore_label: # Start new segment immediately if current label is an action
+                 current_action = label
+                 start_frame = t
+    if current_action != -1 and start_frame != -1:
+        segments[current_action].append({'start_frame': start_frame, 'end_frame': T})
+    return segments
+
 def find_nearest_subsampled_idx(original_idx, frame_indices):
     """Find the nearest subsampled frame index to the original frame index"""
     differences = np.abs(np.array(frame_indices) - original_idx)
@@ -18,6 +41,15 @@ def gaussian_kernel(center, window_size, sigma=1.0):
     x = torch.arange(window_size).float()
     return torch.exp(-((x - center) ** 2) / (2 * sigma**2))
 
+def merge_segments(segs):
+    segs = sorted(segs, key=lambda x: x[0])
+    merged = []
+    for s,e in segs:
+        if not merged or s > merged[-1][1]:
+            merged.append([s,e])
+        else:
+            merged[-1][1] = max(merged[-1][1], e)
+    return [(int(a),int(b)) for a,b in merged]
 
 def set_seed(seed=42):
     random.seed(seed)

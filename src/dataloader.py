@@ -1,275 +1,291 @@
+import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 import json
-from pathlib import Path
-import src.utils.helpers as helpers
+import random
+import src.utils.feature_extraction as feature_extraction
 
-class FeatureDataset(Dataset):
-    def __init__(self, features_dir, anno_dir, num_classes, mode='train', max_seq_len=600, stride=8, window_size=16):
-        self.features_dir = Path(features_dir)
-        self.anno_dir = Path(anno_dir)
-        self.num_classes = num_classes
+NUM_CLASSES = 5
+WINDOW_SIZE = 32
+MVIT_STRIDE = 16
+
+BASE_DIR = "Data"
+
+MVIT_FEATURES_BASE_DIR = os.path.join(BASE_DIR, "features", "mvit_32f_16s")
+RESNET_FEATURES_BASE_DIR = os.path.join(BASE_DIR, "features", "resnet18_per_frame")
+
+ANNOTATIONS_BASE_DIR = os.path.join(BASE_DIR, "full_videos")
+POSE_BASE_DIR = os.path.join(BASE_DIR, "full_videos")
+
+TRAIN_MVIT_DIR = os.path.join(MVIT_FEATURES_BASE_DIR, "train")
+TRAIN_RESNET_DIR = os.path.join(RESNET_FEATURES_BASE_DIR, "train")
+TRAIN_ANNO_DIR = os.path.join(ANNOTATIONS_BASE_DIR, "train", "annotations")
+TRAIN_POSE_DIR = os.path.join(POSE_BASE_DIR, "train", "pose")
+
+VAL_MVIT_DIR = os.path.join(MVIT_FEATURES_BASE_DIR, "val")
+VAL_RESNET_DIR = os.path.join(RESNET_FEATURES_BASE_DIR, "val")
+VAL_ANNO_DIR = os.path.join(ANNOTATIONS_BASE_DIR, "val", "annotations")
+VAL_POSE_DIR = os.path.join(POSE_BASE_DIR, "val", "pose")
+
+TEST_MVIT_DIR = os.path.join(MVIT_FEATURES_BASE_DIR, "test")
+TEST_RESNET_DIR = os.path.join(RESNET_FEATURES_BASE_DIR, "test")
+TEST_ANNO_DIR = os.path.join(ANNOTATIONS_BASE_DIR, "test", "annotations")
+TEST_POSE_DIR = os.path.join(POSE_BASE_DIR, "test", "pose")
+
+
+class FeatureVideoDataset(Dataset):
+    def __init__(self, mvit_dir, resnet_dir, anno_dir, pose_dir, mode='train', window_size=WINDOW_SIZE):
+        self.mvit_dir = mvit_dir
+        self.resnet_dir = resnet_dir
+        self.anno_dir = anno_dir
+        self.pose_dir = pose_dir
         self.mode = mode
-        self.samples = []
-        self.max_seq_len = max_seq_len
-        self.stride = stride
         self.window_size = window_size
-        self.background_class_idx = 0
-        self.ignore_index = -100
+        self.mvit_stride = MVIT_STRIDE
+        self.samples = []
 
-        # Get all feature files
-        feature_files = [f for f in self.features_dir.iterdir() if f.name.endswith('_features.npz')]
-        
-        for feature_file in feature_files:
-            video_id = feature_file.name.replace('_features.npz', '')
-            anno_path = self.anno_dir / f"{video_id}_annotations.json"
+        video_ids = []
+        if os.path.exists(self.mvit_dir):
+            for fname in os.listdir(self.mvit_dir):
+                if fname.endswith("_features.npz"):
+                    video_id = fname.replace("_features.npz", "")
+                    resnet_path = os.path.join(self.resnet_dir, f"{video_id}_resnet_features.npz")
+                    anno_path = os.path.join(self.anno_dir, f"{video_id}_annotations.json")
+                    pose_path = os.path.join(self.pose_dir, f"{video_id}_pose.npz")
+
+                    if os.path.exists(resnet_path) and os.path.exists(anno_path) and os.path.exists(pose_path):
+                        video_ids.append(video_id)
+                    else:
+                        missing = []
+                        if not os.path.exists(resnet_path): missing.append(f"ResNet features ({resnet_path})")
+                        if not os.path.exists(anno_path): missing.append(f"annotations ({anno_path})")
+                        if not os.path.exists(pose_path): missing.append(f"pose ({pose_path})")
+                        print(f"skip {video_id} in '{mode}' because missing: {', '.join(missing)}")
+        else:
+            print(f"Error: Folder not found '{mode}': {self.mvit_dir}")
             
-            if anno_path.exists():
-                self._process_video(video_id)
-            else:
-                print(f"Skipping {video_id} - missing annotations")
+        for video_id in video_ids:
+            self._process_video(video_id)
                 
-        print(f"[{mode}] Loaded {len(self.samples)} samples from {len(feature_files)} videos")
-        
+        print(f"[{mode}] Loaded {len(self.samples)} sliding windows from {len(video_ids)} videos.")
+        if len(video_ids) > 0 and len(self.samples) == 0:
+            print(f"[{mode}] No valid sliding windows found")
+
     def _process_video(self, video_id):
-        # Load annotations
-        anno_path = self.anno_dir / f"{video_id}_annotations.json"
-        with open(anno_path, 'r') as f:
-            anno = json.load(f)
-            
-        # Load features
-        feature_path = self.features_dir / f"{video_id}_features.npz"
-        features = np.load(feature_path)
-        clip_features = features['clip_features']  # Shape: [num_frames, feature_dim]
+        anno_path = os.path.join(self.anno_dir, f"{video_id}_annotations.json")
+        try:
+            with open(anno_path, 'r') as f:
+                anno_data = json.load(f)
+        except Exception as e:
+            print(f"Error while loading videos {video_id}: {e}")
+            return
         
-        # Create sample
+        num_video_frames = anno_data["num_frames"]
+        annotations = anno_data["annotations"]
+
+        mvit_feature_path = os.path.join(self.mvit_dir, f"{video_id}_features.npz")
+        try:
+            mvit_npz = np.load(mvit_feature_path)
+            # Giả sử 'features' luôn tồn tại nếu file .npz được load thành công
+            num_mvit_windows_in_file = mvit_npz['features'].shape[0]
+        except Exception as e:
+            print(f"Cannot load video {video_id}")
+            return
+
+        mvit_window_idx_counter = 0
+        for i in range(num_mvit_windows_in_file):
+            start_frame_of_window = i * self.mvit_stride
+            end_frame_for_slicing = start_frame_of_window + self.window_size
+            
+            self._add_window(video_id, start_frame_of_window, end_frame_for_slicing, annotations, mvit_window_idx_counter)
+            mvit_window_idx_counter += 1
+            
+            if self.mvit_stride == 0:
+                break
+            if (i + 1) * self.mvit_stride >= num_video_frames and start_frame_of_window < (i+1) * self.mvit_stride:
+                 break
+
+    def _add_window(self, video_id, start_idx, end_idx_for_slicing, all_annotations, mvit_window_idx):
+        window_annos = []
+        for anno in all_annotations:
+            action_start = anno["start_frame"]
+            action_end = anno["end_frame"]
+            if action_end < start_idx or action_start >= end_idx_for_slicing:
+                continue
+            rel_start = max(0, action_start - start_idx)
+            rel_end = min(self.window_size, action_end - start_idx)
+            if rel_end > rel_start:
+                window_annos.append({
+                    "action_id": anno["action_id"]-1,
+                    "start_frame": rel_start,
+                    "end_frame": rel_end,
+                })
         self.samples.append({
-            'video_id': video_id,
-            'features': clip_features,
-            'annotations': anno
+            "video_id": video_id,
+            "mvit_window_idx": mvit_window_idx,
+            "slice_start_idx": start_idx,
+            "annotations": window_annos
         })
-
-    def _compute_iou(self, window_start, window_end, action_start, action_end):
-        # window_end và action_end là frame CUỐI CÙNG CÓ trong đoạn
-        intersection_start = max(window_start, action_start)
-        intersection_end = min(window_end, action_end)
-
-        if intersection_end < intersection_start: # Không có overlap
-            return 0.0
-
-        intersection_length = intersection_end - intersection_start + 1
-        window_length = window_end - window_start + 1
-        action_length = action_end - action_start + 1
-        union_length = window_length + action_length - intersection_length
-
-        return intersection_length / union_length if union_length > 0 else 0.0
-
-    def _get_window_center(self, token_idx):
-        """Get the center frame of the window represented by this token."""
-        window_start = token_idx * self.stride
-        window_end = window_start + self.window_size - 1
-        return (window_start + window_end) / 2
 
     def __len__(self):
         return len(self.samples)
-        
+
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        features = sample['features']  # [T_video, D_backbone]
-        annotations = sample['annotations']
+        video_id = sample["video_id"]
+        mvit_window_idx_to_load = sample["mvit_window_idx"]
+        slice_start_idx = sample["slice_start_idx"]
+        annotations = sample["annotations"]
         
-        # Convert features to tensor
-        features = torch.from_numpy(features).float()
-        T_video = features.shape[0]
-        
-        # Initialize ground truth tensors
-        gt_classes = torch.full((self.max_seq_len,), self.ignore_index, dtype=torch.long)
-        gt_offsets = torch.zeros((self.max_seq_len, 2), dtype=torch.float)
-        offset_loss_mask = torch.zeros(self.max_seq_len, dtype=torch.bool)
-        gt_actionness = torch.zeros(self.max_seq_len, dtype=torch.float)
-        attention_padding_mask = torch.ones(self.max_seq_len, dtype=torch.bool)
-        
-        # Set padding mask for actual data
-        attention_padding_mask[:T_video] = False
-        
-        # Process each token
-        for token_idx in range(min(T_video, self.max_seq_len)):
-            window_start = token_idx * self.stride
-            window_end = window_start + self.window_size - 1
-            window_center = self._get_window_center(token_idx)
-            # Find overlapping actions
-            overlapping_actions = []
-            for anno in annotations['annotations']:
-                action_start = anno['start_frame']
-                action_end = anno['end_frame']
-                action_class = anno['action_id']
-                
-                iou = self._compute_iou(window_start, window_end, action_start, action_end)
-                if iou > 0.1:  # Significant overlap threshold
-                    overlapping_actions.append({
-                        'class': action_class,
-                        'start': action_start,
-                        'end': action_end,
-                        'iou': iou,
-                        'center_dist': abs((action_start + action_end) / 2 - window_center)
-                    })
+        try:
+            mvit_feature_path = os.path.join(self.mvit_dir, f"{video_id}_features.npz")
+            mvit_npz = np.load(mvit_feature_path)
+            mvit_feature = mvit_npz['features'][mvit_window_idx_to_load]
+            mvit_feature_tensor = torch.from_numpy(mvit_feature).float()
+
+            resnet_feature_path = os.path.join(self.resnet_dir, f"{video_id}_resnet_features.npz")
+            resnet_npz = np.load(resnet_feature_path)
+            all_resnet_features = resnet_npz['features']
             
-            if not overlapping_actions:
-                # No significant overlap - background
-                gt_classes[token_idx] = self.background_class_idx
-                gt_actionness[token_idx] = 0.0
-                offset_loss_mask[token_idx] = False
-            elif len(overlapping_actions) == 1:
-                # Single action overlap - clear case
-                action = overlapping_actions[0]
-                gt_classes[token_idx] = action['class']
-                gt_actionness[token_idx] = 1.0
+            resnet_window_data = np.zeros((self.window_size, all_resnet_features.shape[1]), dtype=all_resnet_features.dtype)
+            actual_end_idx = min(slice_start_idx + self.window_size, all_resnet_features.shape[0])
+            available_resnet_features = all_resnet_features[slice_start_idx:actual_end_idx]
+            num_available_resnet_frames = available_resnet_features.shape[0]
+            
+            if num_available_resnet_frames > 0:
+                resnet_window_data[:num_available_resnet_frames] = available_resnet_features
+                if num_available_resnet_frames < self.window_size:
+                    resnet_window_data[num_available_resnet_frames:] = available_resnet_features[-1]
+            resnet_features_tensor = torch.from_numpy(resnet_window_data).float()
+
+            pose_path = os.path.join(self.pose_dir, f"{video_id}_pose.npz")
+            pose_npz = np.load(pose_path)
+            all_pose_raw = pose_npz['pose']
+            
+            pose_window_raw = np.zeros((self.window_size, all_pose_raw.shape[1]), dtype=all_pose_raw.dtype)
+            actual_end_idx_pose = min(slice_start_idx + self.window_size, all_pose_raw.shape[0])
+            available_pose_raw = all_pose_raw[slice_start_idx:actual_end_idx_pose]
+            num_available_pose_frames = available_pose_raw.shape[0]
+
+            if num_available_pose_frames > 0:
+                pose_window_raw[:num_available_pose_frames] = available_pose_raw
+                if num_available_pose_frames < self.window_size:
+                    pose_window_raw[num_available_pose_frames:] = available_pose_raw[-1]
+            
+            velocity_data = feature_extraction.compute_velocity(pose_window_raw)
+            pose_with_velocity = np.concatenate([pose_window_raw, velocity_data], axis=1)
+            pose_with_velocity_tensor = torch.from_numpy(pose_with_velocity).float()
+            
+            action_masks = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+            start_mask = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+            end_mask = torch.zeros((NUM_CLASSES, self.window_size), dtype=torch.float32)
+            
+            def gaussian_kernel(center, sigma=1.0):
+                x = torch.arange(self.window_size).float()
+                return torch.exp(-((x - center) ** 2) / (2 * sigma ** 2))
+            
+            has_action = False
+            for anno in annotations:
+                action_id = anno["action_id"]
+                s, e = anno["start_frame"], anno["end_frame"]
+                action_masks[action_id, s:e] = 1.0
+                has_action = True
+                start_mask[action_id] += gaussian_kernel(s, sigma=2.0)
+                end_mask[action_id] += gaussian_kernel(e - 1 if e > s else s, sigma=2.0)
                 
-                # Compute target offsets
-                d_left = max(0, window_center - action['start'])
-                d_right = max(0, action['end'] - window_center)
-                gt_offsets[token_idx] = torch.tensor([d_left, d_right])
-                offset_loss_mask[token_idx] = True
-            else:
-                # Multiple actions - ambiguous case
-                # Choose action with highest IoU
-                best_action = max(overlapping_actions, key=lambda x: x['iou'])
-                gt_classes[token_idx] = best_action['class']
-                gt_actionness[token_idx] = 1.0
-                offset_loss_mask[token_idx] = False  # Don't train offsets for ambiguous cases
-        if T_video < self.max_seq_len:
-            # Chỉ gán ignore_index cho các token thực sự là padding
-            # Những token < T_video đã được gán là action hoặc background thật sự rồi
-            gt_classes[T_video:] = self.ignore_index
-        # Pad features to max_seq_len
-        padded_features = torch.zeros((self.max_seq_len, features.shape[1]), dtype=features.dtype)
-        padded_features[:T_video] = features[:self.max_seq_len]
-        
-        return {
-            'feature_sequence': padded_features,         # [max_seq_len, D_backbone]
-            'gt_classes': gt_classes,                    # [max_seq_len]
-            'gt_offsets': gt_offsets,                    # [max_seq_len, 2]
-            'offset_loss_mask': offset_loss_mask,        # [max_seq_len]
-            'gt_actionness': gt_actionness,              # [max_seq_len]
-            'attention_padding_mask': attention_padding_mask,  # [max_seq_len]
-            'metadata': {
-                'video_id': sample['video_id'],
-                'num_frames': annotations['num_frames']
+            start_mask = torch.clamp(start_mask, 0, 1)
+            end_mask = torch.clamp(end_mask, 0, 1)
+            
+            metadata = {
+                "video_id": video_id,
+                "slice_start_idx": slice_start_idx,
+                "mvit_window_idx": mvit_window_idx_to_load,
+                "has_action": has_action,
+                "annotations": annotations
             }
-        }
+            
+            return mvit_feature_tensor, resnet_features_tensor, pose_with_velocity_tensor, \
+                   action_masks, start_mask, end_mask, metadata
 
-def custom_collate_fn(batch):
-    # Stack all tensors
-    feature_sequences = torch.stack([item['feature_sequence'] for item in batch])
-    gt_classes = torch.stack([item['gt_classes'] for item in batch])
-    gt_offsets = torch.stack([item['gt_offsets'] for item in batch])
-    offset_loss_masks = torch.stack([item['offset_loss_mask'] for item in batch])
-    gt_actionness = torch.stack([item['gt_actionness'] for item in batch])
-    attention_padding_masks = torch.stack([item['attention_padding_mask'] for item in batch])
+        except Exception as e:
+            raise e
+
+
+def custom_feature_collate_fn(batch):
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None 
+
+    mvit_features, resnet_features, pose_data, \
+    action_masks, start_masks, end_masks, metadata = zip(*batch)
     
-    # Collect metadata
-    metadata = [item['metadata'] for item in batch]
+    mvit_features = torch.stack(mvit_features)
+    resnet_features = torch.stack(resnet_features)
+    pose_data = torch.stack(pose_data)
+    action_masks = torch.stack(action_masks)
+    start_masks = torch.stack(start_masks)
+    end_masks = torch.stack(end_masks)
     
-    return {
-        'feature_sequence': feature_sequences,      # [batch_size, max_seq_len, D_backbone]
-        'gt_classes': gt_classes,                   # [batch_size, max_seq_len]
-        'gt_offsets': gt_offsets,                   # [batch_size, max_seq_len, 2]
-        'offset_loss_mask': offset_loss_masks,      # [batch_size, max_seq_len]
-        'gt_actionness': gt_actionness,             # [batch_size, max_seq_len]
-        'attention_padding_mask': attention_padding_masks,  # [batch_size, max_seq_len]
-        'metadata': metadata
-    }
+    return mvit_features, resnet_features, pose_data, \
+           action_masks, start_masks, end_masks, metadata
 
-def get_train_loader(cfg, shuffle=True):
-    data_cfg = cfg.get('data', {})
-    train_cfg = cfg.get('base_model_training', {})
-    global_cfg = cfg.get('global', {})
-
-    features_dir = Path(data_cfg.get('base_dir', 'data')) / 'features/train'
-    anno_dir = Path(data_cfg.get('base_dir', 'data')) / 'full_videos/train/annotations'
-    num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
-    batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
-    num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
-    max_seq_len = global_cfg.get('max_seq_len', 600)
-    stride = global_cfg.get('stride', 8)
-    window_size = global_cfg.get('window_size', 16)
-
-    dataset = FeatureDataset(
-        features_dir,
-        anno_dir,
-        num_classes=num_classes,
-        mode='train',
-        max_seq_len=max_seq_len,
-        stride=stride,
-        window_size=window_size
+def get_feature_train_loader(batch_size=1, shuffle=True, num_workers=0):
+    dataset = FeatureVideoDataset(
+        TRAIN_MVIT_DIR,
+        TRAIN_RESNET_DIR, 
+        TRAIN_ANNO_DIR, 
+        TRAIN_POSE_DIR,
+        mode='train'
     )
+    if len(dataset) == 0:
+        print("Training dataset empty")
+        return None
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
         num_workers=num_workers,
-        collate_fn=custom_collate_fn
+        collate_fn=custom_feature_collate_fn,
+        pin_memory=True if num_workers > 0 else False
     )
 
-def get_val_loader(cfg, shuffle=False):
-    data_cfg = cfg.get('data', {})
-    train_cfg = cfg.get('base_model_training', {})
-    global_cfg = cfg.get('global', {})
-
-    features_dir = Path(data_cfg.get('base_dir', 'data')) / 'features/val'
-    anno_dir = Path(data_cfg.get('base_dir', 'data')) / 'full_videos/val/annotations'
-    num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
-    batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
-    num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
-    max_seq_len = global_cfg.get('max_seq_len', 600)
-    stride = global_cfg.get('stride', 8)
-    window_size = global_cfg.get('window_size', 16)
-
-    dataset = FeatureDataset(
-        features_dir,
-        anno_dir,
-        num_classes=num_classes,
-        mode='val',
-        max_seq_len=max_seq_len,
-        stride=stride,
-        window_size=window_size
+def get_feature_val_loader(batch_size=1, shuffle=False, num_workers=0):
+    dataset = FeatureVideoDataset(
+        VAL_MVIT_DIR,
+        VAL_RESNET_DIR,
+        VAL_ANNO_DIR, 
+        VAL_POSE_DIR,
+        mode='val'
     )
+    if len(dataset) == 0:
+        print("Validation dataset empty")
+        return None
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
         num_workers=num_workers,
-        collate_fn=custom_collate_fn
+        collate_fn=custom_feature_collate_fn,
+        pin_memory=True if num_workers > 0 else False
     )
 
-def get_test_loader(cfg, shuffle=False):
-    data_cfg = cfg.get('data', {})
-    train_cfg = cfg.get('base_model_training', {})
-    global_cfg = cfg.get('global', {})
-
-    features_dir = Path(data_cfg.get('base_dir', 'data')) / 'features/test'
-    anno_dir = Path(data_cfg.get('base_dir', 'data')) / 'full_videos/test/annotations'
-    num_classes = global_cfg.get('num_classes', 6)  # Now default to 6 classes (background + 5 actions)
-    batch_size = train_cfg.get('dataloader', {}).get('batch_size', 1)
-    num_workers = train_cfg.get('dataloader', {}).get('num_workers', 4)
-    max_seq_len = global_cfg.get('max_seq_len', 600)
-    stride = global_cfg.get('stride', 8)
-    window_size = global_cfg.get('window_size', 16)
-
-    dataset = FeatureDataset(
-        features_dir,
-        anno_dir,
-        num_classes=num_classes,
-        mode='test',
-        max_seq_len=max_seq_len,
-        stride=stride,
-        window_size=window_size
+def get_feature_test_loader(batch_size=1, shuffle=False, num_workers=0):
+    dataset = FeatureVideoDataset(
+        TEST_MVIT_DIR,
+        TEST_RESNET_DIR,
+        TEST_ANNO_DIR, 
+        TEST_POSE_DIR,
+        mode='test'
     )
+    if len(dataset) == 0:
+        print("Test dataset empty")
+        return None
     return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
+        dataset, 
+        batch_size=batch_size, 
+        shuffle=shuffle, 
         num_workers=num_workers,
-        collate_fn=custom_collate_fn
+        collate_fn=custom_feature_collate_fn,
+        pin_memory=True if num_workers > 0 else False
     )
